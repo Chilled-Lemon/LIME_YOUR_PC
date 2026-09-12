@@ -49,3 +49,10 @@ LIME_YOUR_PC 并不是简单导入一份固定电源计划。
 
 ```text
 All processors
+```
+### ICON
+<p align="center">
+  <img src="Assets/LIME_YOUR_PC_icon.png" width="96">
+</p>
+
+<h1 align="center">LIME_YOUR_PC</h1>
