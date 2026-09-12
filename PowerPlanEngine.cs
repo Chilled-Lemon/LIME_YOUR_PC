@@ -1,0 +1,634 @@
+using System.Diagnostics;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Text.RegularExpressions;
+using Microsoft.Win32;
+
+namespace LIME_YOUR_PC;
+
+public sealed record HardwareInfo(
+    string CpuName,
+    string Manufacturer,
+    int LogicalProcessors,
+    int PhysicalCores,
+    bool IsLaptop,
+    bool IsIntel,
+    bool IsAmd,
+    bool IsIntelHybrid,
+    bool HasEnabledEfficiencyCores);
+
+public sealed record EngineProgress(int Percent, string Message);
+
+public sealed record OptimizationResult(
+    string PlanGuid,
+    int SuccessCount,
+    int SkippedCount,
+    int MismatchCount,
+    bool ReusedExistingPlan);
+
+internal sealed record PowerCfgResult(int ExitCode, string Output);
+
+public sealed class PowerPlanEngine
+{
+    public const string AppName = "LIME_YOUR_PC";
+    private const string LegacyAppName = "LEMON_YOUR_PC";
+    public const string Version = "v0.4.0";
+    public static readonly string LogFile = Path.Combine(AppContext.BaseDirectory, AppName + ".log");
+
+    private const string HighPerformanceGuid = "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c";
+    private const string UsbSubgroup = "2a737441-1930-4402-8d77-b2bebba308a3";
+    private const string UsbSelectiveSuspend = "48e6b7a6-50f5-4782-a5d4-53bb8f07e226";
+    private const string Usb3LinkPower = "d4e98f31-5ffe-4ce1-be31-1b38b384c009";
+    private const string ProcessorSubgroup = "54533251-82be-4824-96c1-47b60b740d00";
+    private const string PerfIncreaseThreshold = "06cadf0e-64ed-448a-8927-ce7bf90eb35d";
+    private const string Class1PerfIncreaseThreshold = "06cadf0e-64ed-448a-8927-ce7bf90eb35e";
+    private const string PerfCoreParkingMinCores = "0cc5b647-c1df-4637-891a-dec35c318583";
+    private const string Class1PerfCoreParkingMinCores = "0cc5b647-c1df-4637-891a-dec35c318584";
+    private const string AllowThrottleStates = "3b04d4fd-1cc7-4f23-ab1c-d1337819c4bb";
+    private const string IdleDemoteThreshold = "4b92d758-5a24-4851-a470-815d78aee119";
+    private const string IdlePromoteThreshold = "7b224883-b3cc-4d79-819f-8374152cbe7c";
+    private const string PerfTimeCheckInterval = "4d2b0152-7d5c-498b-88e2-34345392a2c5";
+    private const string MinProcessorState = "893dee8e-2bef-41e0-89c6-b55d0929964c";
+    private const string Class1MinProcessorState = "893dee8e-2bef-41e0-89c6-b55d0929964d";
+    private const string Class2MinProcessorState = "893dee8e-2bef-41e0-89c6-b55d0929964e";
+    private const string HeterogeneousSchedulingPolicy = "93b8b6dc-0698-4d1c-9ee4-0644e900c85d";
+
+    public HardwareInfo DetectHardware()
+    {
+        // Hardware detection deliberately avoids PowerShell/WMI. On some systems CIM/WMI
+        // providers can be very slow or unhealthy, which used to make the GUI appear frozen
+        // during startup. Everything below is read through the registry or Win32 APIs.
+        string cpuName = "Unknown CPU";
+        string manufacturer = "Unknown";
+
+        try
+        {
+            using RegistryKey? cpuKey = Registry.LocalMachine.OpenSubKey(
+                @"HARDWARE\DESCRIPTION\System\CentralProcessor\0", writable: false);
+
+            cpuName = (cpuKey?.GetValue("ProcessorNameString") as string)?.Trim() ?? cpuName;
+            manufacturer = (cpuKey?.GetValue("VendorIdentifier") as string)?.Trim() ?? manufacturer;
+        }
+        catch (Exception ex)
+        {
+            Log("CPU registry detection failed: " + ex.Message);
+        }
+
+        bool isIntel = manufacturer.Contains("GenuineIntel", StringComparison.OrdinalIgnoreCase)
+                       || manufacturer.Contains("Intel", StringComparison.OrdinalIgnoreCase)
+                       || cpuName.Contains("Intel", StringComparison.OrdinalIgnoreCase);
+        bool isAmd = manufacturer.Contains("AuthenticAMD", StringComparison.OrdinalIgnoreCase)
+                     || manufacturer.Contains("AMD", StringComparison.OrdinalIgnoreCase)
+                     || cpuName.Contains("AMD", StringComparison.OrdinalIgnoreCase);
+
+        int logical = GetLogicalProcessorCount();
+        int physical = GetPhysicalCoreCount();
+        bool isLaptop = HasSystemBattery();
+
+        // Windows CPU Sets expose EfficiencyClass. If enabled Intel P-cores and E-cores
+        // are both visible, more than one efficiency class is present. If E-cores are
+        // disabled in BIOS, only one class remains, so this reflects the active topology
+        // instead of guessing from the CPU model name.
+        HashSet<byte> efficiencyClasses = GetEfficiencyClasses();
+        bool hybrid = isIntel && efficiencyClasses.Count > 1;
+
+        Log($"Hardware | CPU={cpuName} vendor={manufacturer} physical={physical} logical={logical} " +
+            $"battery={isLaptop} efficiencyClasses=[{string.Join(",", efficiencyClasses.OrderBy(x => x))}] hybrid={hybrid}");
+
+        return new HardwareInfo(
+            cpuName,
+            manufacturer,
+            logical,
+            physical,
+            isLaptop,
+            isIntel,
+            isAmd,
+            hybrid,
+            hybrid);
+    }
+
+    private static int GetLogicalProcessorCount()
+    {
+        try
+        {
+            uint count = NativeMethods.GetActiveProcessorCount(NativeMethods.ALL_PROCESSOR_GROUPS);
+            if (count > 0 && count <= int.MaxValue)
+                return (int)count;
+        }
+        catch (Exception ex)
+        {
+            Log("GetActiveProcessorCount failed: " + ex.Message);
+        }
+
+        return Environment.ProcessorCount;
+    }
+
+    private static int GetPhysicalCoreCount()
+    {
+        IntPtr buffer = IntPtr.Zero;
+        try
+        {
+            uint length = 0;
+            NativeMethods.GetLogicalProcessorInformationEx(
+                NativeMethods.LOGICAL_PROCESSOR_RELATIONSHIP.RelationProcessorCore,
+                IntPtr.Zero,
+                ref length);
+
+            if (length == 0)
+                return 0;
+
+            buffer = Marshal.AllocHGlobal(checked((int)length));
+            if (!NativeMethods.GetLogicalProcessorInformationEx(
+                    NativeMethods.LOGICAL_PROCESSOR_RELATIONSHIP.RelationProcessorCore,
+                    buffer,
+                    ref length))
+            {
+                Log("GetLogicalProcessorInformationEx failed: " + Marshal.GetLastWin32Error());
+                return 0;
+            }
+
+            int coreCount = 0;
+            int offset = 0;
+            while (offset + 8 <= length)
+            {
+                int relationship = Marshal.ReadInt32(buffer, offset);
+                int size = Marshal.ReadInt32(buffer, offset + 4);
+                if (size < 8 || offset + size > length)
+                    break;
+
+                if (relationship == (int)NativeMethods.LOGICAL_PROCESSOR_RELATIONSHIP.RelationProcessorCore)
+                    coreCount++;
+
+                offset += size;
+            }
+
+            return coreCount;
+        }
+        catch (Exception ex)
+        {
+            Log("Physical-core detection failed: " + ex.Message);
+            return 0;
+        }
+        finally
+        {
+            if (buffer != IntPtr.Zero)
+                Marshal.FreeHGlobal(buffer);
+        }
+    }
+
+    private static bool HasSystemBattery()
+    {
+        try
+        {
+            if (!NativeMethods.GetSystemPowerStatus(out NativeMethods.SYSTEM_POWER_STATUS status))
+                return false;
+
+            // 128 = no system battery, 255 = unknown.
+            return status.BatteryFlag != 128 && status.BatteryFlag != 255;
+        }
+        catch (Exception ex)
+        {
+            Log("Battery detection failed: " + ex.Message);
+            return false;
+        }
+    }
+
+    private static HashSet<byte> GetEfficiencyClasses()
+    {
+        var classes = new HashSet<byte>();
+        IntPtr buffer = IntPtr.Zero;
+
+        try
+        {
+            uint requiredLength = 0;
+            NativeMethods.GetSystemCpuSetInformation(
+                IntPtr.Zero,
+                0,
+                out requiredLength,
+                IntPtr.Zero,
+                0);
+
+            if (requiredLength == 0)
+                return classes;
+
+            buffer = Marshal.AllocHGlobal(checked((int)requiredLength));
+            if (!NativeMethods.GetSystemCpuSetInformation(
+                    buffer,
+                    requiredLength,
+                    out uint returnedLength,
+                    IntPtr.Zero,
+                    0))
+            {
+                Log("GetSystemCpuSetInformation failed: " + Marshal.GetLastWin32Error());
+                return classes;
+            }
+
+            int offset = 0;
+            while (offset + 8 <= returnedLength)
+            {
+                int size = Marshal.ReadInt32(buffer, offset);
+                int type = Marshal.ReadInt32(buffer, offset + 4);
+
+                if (size < 8 || offset + size > returnedLength)
+                    break;
+
+                // CPU_SET_INFORMATION_TYPE.CpuSetInformation == 0.
+                // SYSTEM_CPU_SET_INFORMATION.CpuSet.EfficiencyClass is byte offset 18.
+                if (type == 0 && size >= 20)
+                    classes.Add(Marshal.ReadByte(buffer, offset + 18));
+
+                offset += size;
+            }
+        }
+        catch (EntryPointNotFoundException)
+        {
+            // Very old Windows builds may not expose CPU Set APIs. In that case we simply
+            // leave the set empty and fall back to non-hybrid behavior.
+        }
+        catch (Exception ex)
+        {
+            Log("Efficiency-class detection failed: " + ex.Message);
+        }
+        finally
+        {
+            if (buffer != IntPtr.Zero)
+                Marshal.FreeHGlobal(buffer);
+        }
+
+        return classes;
+    }
+
+    public OptimizationResult Apply(HardwareInfo hw, IProgress<EngineProgress>? progress = null)
+    {
+        Report(progress, 3, "检查现有 LIME_YOUR_PC 电源计划…");
+
+        string? existingPlanGuid = FindExistingLimePlan(out bool legacyPlanName);
+        bool reused = existingPlanGuid is not null;
+        string planGuid;
+
+        if (existingPlanGuid is not null)
+        {
+            planGuid = existingPlanGuid;
+
+            if (legacyPlanName)
+            {
+                RunPowerCfg($"/changename {planGuid} \"{AppName}\" \"{AppName} {Version} - Gaming Power Plan\"");
+                Report(progress, 8, $"检测到旧版 {LegacyAppName} 计划，已迁移为 {AppName}。 ");
+            }
+
+            Report(progress, 10, $"找到已有计划，直接复用：{planGuid}");
+        }
+        else
+        {
+            string? baseGuid = FindHighPerformancePlan();
+            if (baseGuid is null)
+            {
+                baseGuid = GetActiveSchemeGuid();
+                if (baseGuid is null)
+                    throw new InvalidOperationException("无法取得当前活动电源计划。\n请确认 powercfg 可正常工作。");
+
+                Report(progress, 8, "未找到 Windows 高性能计划，将以当前活动计划作为基础。 ");
+            }
+            else
+            {
+                Report(progress, 8, "找到 Windows 高性能计划，使用它作为基础。 ");
+            }
+
+            planGuid = DuplicateScheme(baseGuid)
+                       ?? throw new InvalidOperationException("创建 LIME_YOUR_PC 电源计划失败。");
+
+            if (!RunPowerCfg($"/changename {planGuid} \"{AppName}\" \"{AppName} {Version} - Gaming Power Plan\""))
+                throw new InvalidOperationException("重命名 LIME_YOUR_PC 电源计划失败。");
+
+            Report(progress, 13, $"已创建新计划：{planGuid}");
+        }
+
+        if (!RunPowerCfg($"/setactive {planGuid}"))
+            throw new InvalidOperationException("无法激活 LIME_YOUR_PC 电源计划。");
+
+        int success = 0;
+        int skipped = 0;
+        int step = 0;
+
+        var settings = new List<(string Name, string Group, string Setting, int Value)>
+        {
+            ("USB 选择性暂停", UsbSubgroup, UsbSelectiveSuspend, 0),
+            ("USB3 Link Power Management", UsbSubgroup, Usb3LinkPower, 0),
+            ("处理器性能提高阈值", ProcessorSubgroup, PerfIncreaseThreshold, 1),
+            ("Class 1 处理器性能提高阈值", ProcessorSubgroup, Class1PerfIncreaseThreshold, 1),
+            ("处理器性能最小核心数量", ProcessorSubgroup, PerfCoreParkingMinCores, 100),
+            ("Class 1 处理器性能最小核心数量", ProcessorSubgroup, Class1PerfCoreParkingMinCores, 100),
+            ("允许节流状态", ProcessorSubgroup, AllowThrottleStates, 0),
+            ("处理器闲置降级阈值", ProcessorSubgroup, IdleDemoteThreshold, hw.IsLaptop ? 80 : 100),
+            ("处理器闲置提升阈值", ProcessorSubgroup, IdlePromoteThreshold, hw.IsLaptop ? 85 : 100),
+            ("处理器性能时间间隔", ProcessorSubgroup, PerfTimeCheckInterval, 5000),
+            ("最小处理器状态", ProcessorSubgroup, MinProcessorState, 100),
+            ("Class 1 最小处理器状态", ProcessorSubgroup, Class1MinProcessorState, 100),
+            ("Class 2 最小处理器状态", ProcessorSubgroup, Class2MinProcessorState, 100),
+            ("异类线程调度策略", ProcessorSubgroup, HeterogeneousSchedulingPolicy, GetSchedulingValue(hw))
+        };
+
+        foreach (var s in settings)
+        {
+            bool ok = SetAcValue(planGuid, s.Group, s.Setting, s.Value);
+            if (ok)
+            {
+                success++;
+                Report(progress, 18 + (++step * 3), $"[OK] {s.Name} = {s.Value}");
+            }
+            else
+            {
+                skipped++;
+                Report(progress, 18 + (++step * 3), $"[SKIP] {s.Name}：当前系统不支持或写入失败");
+            }
+        }
+
+        if (RunPowerCfg("/change monitor-timeout-ac 0"))
+        {
+            success++;
+            Report(progress, 66, "[OK] 关闭显示器（AC）= 从不");
+        }
+        else
+        {
+            skipped++;
+            Report(progress, 66, "[SKIP] 关闭显示器（AC）写入失败");
+        }
+
+        // Re-activate after all writes. Some systems apply /change against the active scheme.
+        RunPowerCfg($"/setactive {planGuid}");
+
+        Report(progress, 72, "开始验证写入结果…");
+        int mismatch = Verify(planGuid, hw, progress);
+
+        string? active = GetActiveSchemeGuid();
+        if (!string.Equals(active, planGuid, StringComparison.OrdinalIgnoreCase))
+        {
+            mismatch++;
+            Report(progress, 96, $"[WARNING] 活动计划不是 LIME_YOUR_PC：{active ?? "未知"}");
+        }
+        else
+        {
+            Report(progress, 96, "[PASS] LIME_YOUR_PC 已处于活动状态");
+        }
+
+        Report(progress, 100, reused
+            ? "完成：已复用并刷新现有 LIME_YOUR_PC 计划。"
+            : "完成：已创建并应用 LIME_YOUR_PC 计划。");
+
+        Log($"Completed | plan={planGuid} reused={reused} success={success} skipped={skipped} mismatch={mismatch}");
+        return new OptimizationResult(planGuid, success, skipped, mismatch, reused);
+    }
+
+    public static int GetSchedulingValue(HardwareInfo hw)
+    {
+        if (hw.IsAmd) return 0;
+        if (hw.IsIntel && hw.IsIntelHybrid && hw.HasEnabledEfficiencyCores) return 2;
+        return 1;
+    }
+
+    private int Verify(string planGuid, HardwareInfo hw, IProgress<EngineProgress>? progress)
+    {
+        int mismatch = 0;
+        var checks = new List<(string Name, string Group, string Setting, int Expected)>
+        {
+            ("USB 选择性暂停", UsbSubgroup, UsbSelectiveSuspend, 0),
+            ("USB3 Link Power", UsbSubgroup, Usb3LinkPower, 0),
+            ("性能提高阈值", ProcessorSubgroup, PerfIncreaseThreshold, 1),
+            ("Class 1 性能提高阈值", ProcessorSubgroup, Class1PerfIncreaseThreshold, 1),
+            ("性能最小核心数", ProcessorSubgroup, PerfCoreParkingMinCores, 100),
+            ("Class 1 性能最小核心数", ProcessorSubgroup, Class1PerfCoreParkingMinCores, 100),
+            ("允许节流状态", ProcessorSubgroup, AllowThrottleStates, 0),
+            ("闲置降级阈值", ProcessorSubgroup, IdleDemoteThreshold, hw.IsLaptop ? 80 : 100),
+            ("闲置提升阈值", ProcessorSubgroup, IdlePromoteThreshold, hw.IsLaptop ? 85 : 100),
+            ("性能时间间隔", ProcessorSubgroup, PerfTimeCheckInterval, 5000),
+            ("最小处理器状态", ProcessorSubgroup, MinProcessorState, 100),
+            ("Class 1 最小处理器状态", ProcessorSubgroup, Class1MinProcessorState, 100),
+            ("Class 2 最小处理器状态", ProcessorSubgroup, Class2MinProcessorState, 100),
+            ("异类线程调度", ProcessorSubgroup, HeterogeneousSchedulingPolicy, GetSchedulingValue(hw))
+        };
+
+        int i = 0;
+        foreach (var c in checks)
+        {
+            int? actual = GetAcValue(planGuid, c.Group, c.Setting);
+            int percent = 74 + (++i * 20 / checks.Count);
+
+            if (actual is null)
+            {
+                Report(progress, percent, $"[VERIFY-SKIP] {c.Name}：无法读取");
+            }
+            else if (actual.Value == c.Expected)
+            {
+                Report(progress, percent, $"[PASS] {c.Name} = {actual.Value}");
+            }
+            else
+            {
+                mismatch++;
+                Report(progress, percent, $"[MISMATCH] {c.Name} = {actual.Value}，期望 {c.Expected}");
+            }
+        }
+
+        return mismatch;
+    }
+
+    private string? FindExistingLimePlan(out bool legacyName)
+    {
+        legacyName = false;
+        var r = RunPowerCfgCapture("/list");
+        if (r.ExitCode != 0) return null;
+
+        string? active = GetActiveSchemeGuid();
+        var limeMatches = new List<string>();
+        var legacyMatches = new List<string>();
+
+        foreach (string rawLine in r.Output.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
+        {
+            Match m = Regex.Match(rawLine, @"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}");
+            if (!m.Success) continue;
+
+            if (rawLine.Contains("(" + AppName + ")", StringComparison.OrdinalIgnoreCase))
+                limeMatches.Add(m.Value);
+            else if (rawLine.Contains("(" + LegacyAppName + ")", StringComparison.OrdinalIgnoreCase))
+                legacyMatches.Add(m.Value);
+        }
+
+        if (active is not null && limeMatches.Any(x => x.Equals(active, StringComparison.OrdinalIgnoreCase)))
+            return active;
+        if (limeMatches.Count > 0)
+            return limeMatches[0];
+
+        string? legacy = null;
+        if (active is not null && legacyMatches.Any(x => x.Equals(active, StringComparison.OrdinalIgnoreCase)))
+            legacy = active;
+        else if (legacyMatches.Count > 0)
+            legacy = legacyMatches[0];
+
+        if (legacy is not null) legacyName = true;
+        return legacy;
+    }
+
+    private string? FindHighPerformancePlan()
+    {
+        var r = RunPowerCfgCapture("/list");
+        if (r.ExitCode != 0) return null;
+
+        foreach (Match m in Regex.Matches(r.Output, @"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"))
+        {
+            if (m.Value.Equals(HighPerformanceGuid, StringComparison.OrdinalIgnoreCase))
+                return m.Value;
+        }
+        return null;
+    }
+
+    private string? GetActiveSchemeGuid()
+    {
+        var r = RunPowerCfgCapture("/getactivescheme");
+        Match m = Regex.Match(r.Output, @"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}");
+        return m.Success ? m.Value : null;
+    }
+
+    private string? DuplicateScheme(string sourceGuid)
+    {
+        var r = RunPowerCfgCapture("/duplicatescheme " + sourceGuid);
+        if (r.ExitCode != 0) return null;
+
+        Match m = Regex.Match(r.Output, @"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}");
+        return m.Success ? m.Value : null;
+    }
+
+    private bool SetAcValue(string planGuid, string subgroupGuid, string settingGuid, int value)
+        => RunPowerCfgCapture($"/setacvalueindex {planGuid} {subgroupGuid} {settingGuid} {value}").ExitCode == 0;
+
+    private int? GetAcValue(string planGuid, string subgroupGuid, string settingGuid)
+    {
+        if (!Guid.TryParse(planGuid, out Guid scheme) ||
+            !Guid.TryParse(subgroupGuid, out Guid subgroup) ||
+            !Guid.TryParse(settingGuid, out Guid setting))
+        {
+            return null;
+        }
+
+        try
+        {
+            uint result = NativeMethods.PowerReadACValueIndex(
+                IntPtr.Zero,
+                ref scheme,
+                ref subgroup,
+                ref setting,
+                out uint value);
+
+            if (result == 0)
+                return unchecked((int)value);
+
+            Log($"PowerReadACValueIndex failed | result={result} setting={settingGuid}");
+            return null;
+        }
+        catch (Exception ex)
+        {
+            Log("PowerReadACValueIndex exception: " + ex.Message);
+            return null;
+        }
+    }
+
+    private PowerCfgResult RunPowerCfgCapture(string arguments)
+    {
+        using var process = new Process();
+        process.StartInfo = new ProcessStartInfo
+        {
+            FileName = "powercfg.exe",
+            Arguments = arguments,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            StandardOutputEncoding = Encoding.Default,
+            StandardErrorEncoding = Encoding.Default
+        };
+
+        process.Start();
+        string stdout = process.StandardOutput.ReadToEnd();
+        string stderr = process.StandardError.ReadToEnd();
+        process.WaitForExit();
+
+        string output = stdout;
+        if (!string.IsNullOrWhiteSpace(stderr)) output += Environment.NewLine + stderr;
+        Log($"powercfg {arguments} | exit={process.ExitCode}\n{output}");
+        return new PowerCfgResult(process.ExitCode, output);
+    }
+
+    private bool RunPowerCfg(string arguments)
+        => RunPowerCfgCapture(arguments).ExitCode == 0;
+
+
+    private static void Report(IProgress<EngineProgress>? progress, int percent, string message)
+    {
+        Log(message);
+        progress?.Report(new EngineProgress(percent, message));
+    }
+
+    private static void Log(string text)
+    {
+        try
+        {
+            File.AppendAllText(LogFile, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {text}{Environment.NewLine}", Encoding.UTF8);
+        }
+        catch
+        {
+            // Logging should never abort optimization.
+        }
+    }
+
+    private static class NativeMethods
+    {
+        internal const ushort ALL_PROCESSOR_GROUPS = 0xFFFF;
+
+        internal enum LOGICAL_PROCESSOR_RELATIONSHIP
+        {
+            RelationProcessorCore = 0
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        internal struct SYSTEM_POWER_STATUS
+        {
+            public byte ACLineStatus;
+            public byte BatteryFlag;
+            public byte BatteryLifePercent;
+            public byte SystemStatusFlag;
+            public uint BatteryLifeTime;
+            public uint BatteryFullLifeTime;
+        }
+
+        [DllImport("kernel32.dll")]
+        internal static extern uint GetActiveProcessorCount(ushort GroupNumber);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool GetLogicalProcessorInformationEx(
+            LOGICAL_PROCESSOR_RELATIONSHIP RelationshipType,
+            IntPtr Buffer,
+            ref uint ReturnedLength);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool GetSystemCpuSetInformation(
+            IntPtr Information,
+            uint BufferLength,
+            out uint ReturnedLength,
+            IntPtr Process,
+            uint Flags);
+
+        [DllImport("kernel32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool GetSystemPowerStatus(out SYSTEM_POWER_STATUS SystemPowerStatus);
+
+        [DllImport("powrprof.dll", SetLastError = false)]
+        internal static extern uint PowerReadACValueIndex(
+            IntPtr RootPowerKey,
+            ref Guid SchemeGuid,
+            ref Guid SubGroupOfPowerSettingsGuid,
+            ref Guid PowerSettingGuid,
+            out uint AcValueIndex);
+    }
+
+}
