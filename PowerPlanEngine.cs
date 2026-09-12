@@ -16,7 +16,22 @@ public sealed record HardwareInfo(
     bool IsIntel,
     bool IsAmd,
     bool IsIntelHybrid,
-    bool HasEnabledEfficiencyCores);
+    bool HasEnabledEfficiencyCores,
+    int PerformanceCores,
+    int EfficiencyCores,
+    int PerformanceLogicalProcessors,
+    int EfficiencyLogicalProcessors);
+
+internal sealed record CpuSetEntry(ushort Group, byte LogicalProcessorIndex, byte CoreIndex, byte EfficiencyClass);
+
+internal sealed record CpuTopology(
+    int PhysicalCores,
+    int LogicalProcessors,
+    int PerformanceCores,
+    int EfficiencyCores,
+    int PerformanceLogicalProcessors,
+    int EfficiencyLogicalProcessors,
+    IReadOnlyList<byte> EfficiencyClasses);
 
 public sealed record EngineProgress(int Percent, string Message);
 
@@ -33,7 +48,7 @@ public sealed class PowerPlanEngine
 {
     public const string AppName = "LIME_YOUR_PC";
     private const string LegacyAppName = "LEMON_YOUR_PC";
-    public const string Version = "v0.4.0";
+    public const string Version = "v0.5.1";
     public static readonly string LogFile = Path.Combine(AppContext.BaseDirectory, AppName + ".log");
 
     private const string HighPerformanceGuid = "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c";
@@ -82,19 +97,28 @@ public sealed class PowerPlanEngine
                      || manufacturer.Contains("AMD", StringComparison.OrdinalIgnoreCase)
                      || cpuName.Contains("AMD", StringComparison.OrdinalIgnoreCase);
 
-        int logical = GetLogicalProcessorCount();
-        int physical = GetPhysicalCoreCount();
+        CpuTopology topology = GetCpuTopology();
+        int logical = topology.LogicalProcessors > 0 ? topology.LogicalProcessors : GetLogicalProcessorCount();
+        int physical = topology.PhysicalCores > 0 ? topology.PhysicalCores : GetPhysicalCoreCount();
         bool isLaptop = HasSystemBattery();
 
-        // Windows CPU Sets expose EfficiencyClass. If enabled Intel P-cores and E-cores
-        // are both visible, more than one efficiency class is present. If E-cores are
-        // disabled in BIOS, only one class remains, so this reflects the active topology
-        // instead of guessing from the CPU model name.
-        HashSet<byte> efficiencyClasses = GetEfficiencyClasses();
-        bool hybrid = isIntel && efficiencyClasses.Count > 1;
+        // Windows CPU Sets expose CoreIndex and EfficiencyClass. CoreIndex lets us group
+        // SMT threads into physical cores, while EfficiencyClass lets us distinguish the
+        // faster and less-efficient class from lower-performance classes. For Intel we
+        // present these as P-cores / E-cores only when more than one class is actually
+        // visible to Windows. If E-cores are disabled in BIOS, only one class remains.
+        bool hybrid = isIntel && topology.EfficiencyClasses.Count > 1
+                      && topology.PerformanceCores > 0
+                      && topology.EfficiencyCores > 0;
+
+        int pCores = hybrid ? topology.PerformanceCores : 0;
+        int eCores = hybrid ? topology.EfficiencyCores : 0;
+        int pThreads = hybrid ? topology.PerformanceLogicalProcessors : 0;
+        int eThreads = hybrid ? topology.EfficiencyLogicalProcessors : 0;
 
         Log($"Hardware | CPU={cpuName} vendor={manufacturer} physical={physical} logical={logical} " +
-            $"battery={isLaptop} efficiencyClasses=[{string.Join(",", efficiencyClasses.OrderBy(x => x))}] hybrid={hybrid}");
+            $"battery={isLaptop} efficiencyClasses=[{string.Join(",", topology.EfficiencyClasses)}] " +
+            $"hybrid={hybrid} pCores={pCores} eCores={eCores} pThreads={pThreads} eThreads={eThreads}");
 
         return new HardwareInfo(
             cpuName,
@@ -105,7 +129,11 @@ public sealed class PowerPlanEngine
             isIntel,
             isAmd,
             hybrid,
-            hybrid);
+            eCores > 0,
+            pCores,
+            eCores,
+            pThreads,
+            eThreads);
     }
 
     private static int GetLogicalProcessorCount()
@@ -194,9 +222,9 @@ public sealed class PowerPlanEngine
         }
     }
 
-    private static HashSet<byte> GetEfficiencyClasses()
+    private static CpuTopology GetCpuTopology()
     {
-        var classes = new HashSet<byte>();
+        var entries = new List<CpuSetEntry>();
         IntPtr buffer = IntPtr.Zero;
 
         try
@@ -210,7 +238,7 @@ public sealed class PowerPlanEngine
                 0);
 
             if (requiredLength == 0)
-                return classes;
+                return EmptyTopology();
 
             buffer = Marshal.AllocHGlobal(checked((int)requiredLength));
             if (!NativeMethods.GetSystemCpuSetInformation(
@@ -221,7 +249,7 @@ public sealed class PowerPlanEngine
                     0))
             {
                 Log("GetSystemCpuSetInformation failed: " + Marshal.GetLastWin32Error());
-                return classes;
+                return EmptyTopology();
             }
 
             int offset = 0;
@@ -234,21 +262,30 @@ public sealed class PowerPlanEngine
                     break;
 
                 // CPU_SET_INFORMATION_TYPE.CpuSetInformation == 0.
-                // SYSTEM_CPU_SET_INFORMATION.CpuSet.EfficiencyClass is byte offset 18.
+                // Layout after Size/Type: Id (DWORD), Group (WORD), then four BYTE
+                // indices followed by EfficiencyClass. The documented structure is
+                // variable-sized, so advance by each record's Size field.
                 if (type == 0 && size >= 20)
-                    classes.Add(Marshal.ReadByte(buffer, offset + 18));
+                {
+                    ushort group = unchecked((ushort)Marshal.ReadInt16(buffer, offset + 12));
+                    byte logicalIndex = Marshal.ReadByte(buffer, offset + 14);
+                    byte coreIndex = Marshal.ReadByte(buffer, offset + 15);
+                    byte efficiencyClass = Marshal.ReadByte(buffer, offset + 18);
+                    entries.Add(new CpuSetEntry(group, logicalIndex, coreIndex, efficiencyClass));
+                }
 
                 offset += size;
             }
         }
         catch (EntryPointNotFoundException)
         {
-            // Very old Windows builds may not expose CPU Set APIs. In that case we simply
-            // leave the set empty and fall back to non-hybrid behavior.
+            // Very old Windows builds may not expose CPU Set APIs.
+            return EmptyTopology();
         }
         catch (Exception ex)
         {
-            Log("Efficiency-class detection failed: " + ex.Message);
+            Log("CPU topology detection failed: " + ex.Message);
+            return EmptyTopology();
         }
         finally
         {
@@ -256,8 +293,44 @@ public sealed class PowerPlanEngine
                 Marshal.FreeHGlobal(buffer);
         }
 
-        return classes;
+        if (entries.Count == 0)
+            return EmptyTopology();
+
+        byte[] classes = entries
+            .Select(x => x.EfficiencyClass)
+            .Distinct()
+            .OrderBy(x => x)
+            .ToArray();
+
+        byte highestClass = classes[^1];
+
+        // CoreIndex is group-relative, so Group must be part of the physical-core key.
+        var physicalCores = entries
+            .GroupBy(x => (x.Group, x.CoreIndex))
+            .Select(g => new
+            {
+                EfficiencyClass = g.Max(x => x.EfficiencyClass),
+                LogicalCount = g.Count()
+            })
+            .ToArray();
+
+        int performanceCores = physicalCores.Count(x => x.EfficiencyClass == highestClass);
+        int efficiencyCores = physicalCores.Length - performanceCores;
+        int performanceLogical = entries.Count(x => x.EfficiencyClass == highestClass);
+        int efficiencyLogical = entries.Count - performanceLogical;
+
+        return new CpuTopology(
+            physicalCores.Length,
+            entries.Count,
+            performanceCores,
+            efficiencyCores,
+            performanceLogical,
+            efficiencyLogical,
+            classes);
     }
+
+    private static CpuTopology EmptyTopology()
+        => new(0, 0, 0, 0, 0, 0, Array.Empty<byte>());
 
     public OptimizationResult Apply(HardwareInfo hw, IProgress<EngineProgress>? progress = null)
     {

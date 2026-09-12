@@ -4,7 +4,7 @@
 
 LIME_YOUR_PC 会根据当前硬件平台创建并维护一个独立的高性能电源计划，主要针对游戏性能、系统响应速度以及接通电源时的处理器行为进行优化。
 
-> 当前版本：**v0.4.0**
+> 当前版本：**v0.5.1**
 
 ---
 
@@ -14,7 +14,7 @@ LIME_YOUR_PC 会根据当前硬件平台创建并维护一个独立的高性能�
   <img src="screenshots/main.png" width="900">
 </p>
 
-LIME_YOUR_PC 目前主要针对 Windows 电源计划进行优化。
+LIME_YOUR_PC 以 Windows 电源计划优化为核心，并提供少量可独立开关的系统调整。
 
 程序会检测当前电脑的 CPU、设备类型和处理器拓扑，并根据不同硬件应用对应的优化规则。
 
@@ -137,6 +137,22 @@ LIME_YOUR_PC 不会直接导入一整套来源不明的电源计划参数。
 [PASS] 最小处理器状态 = 100
 ```
 
+
+---
+
+## 🧩 系统调整
+
+v0.5.0 新增几个与电源计划分离的独立开关：
+
+- 关闭 / 开启“提高指针精确度”与 Windows 鼠标加速
+- 关闭 / 开启 Windows Toast 通知
+- 关闭 / 恢复 Windows 自动更新策略
+- 关闭 / 开启 Microsoft Defender 实时保护
+
+这些功能不会跟随“一键电源优化”自动执行，用户需要单独点击。每次修改后，LIME 都会重新读取状态进行验证。
+
+对于 Defender，如果系统开启了 **Tamper Protection / 篡改防护**，LIME 不会尝试绕过它。
+
 ---
 
 ## 🚀 使用方法
@@ -198,6 +214,7 @@ LIME_YOUR_PC：
 - 不删除 Windows 原有电源计划
 - 不修改 DC / Battery 参数
 - 不修改优化白名单以外的电源设置
+- Windows Update 与 Defender 等系统调整均为独立开关，不会被电源优化自动执行
 
 项目源码完全公开，可以自行检查程序实际执行的操作。
 
@@ -246,6 +263,8 @@ LIME_YOUR_PC 主要面向：
 
 ```text
 Power Plan Optimization
+Hardware Topology Detection
+System Tweaks
 ```
 
 未来可能增加：
@@ -254,7 +273,6 @@ Power Plan Optimization
 - 可选择的优化项目
 - 一键恢复默认设置
 - 更多 CPU 平台规则
-- 系统优化模块
 - 网络优化模块
 
 ---

@@ -1,10 +1,10 @@
 @echo off
 setlocal
 
-title LIME_YOUR_PC v0.4.0 Builder
+title LIME_YOUR_PC v0.5.1 Builder
 
 echo ==============================================
-echo        LIME_YOUR_PC v0.4.0 WPF Builder
+echo        LIME_YOUR_PC v0.5.1 WPF Builder
 echo ==============================================
 echo.
 
