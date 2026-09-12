@@ -1,0 +1,8 @@
+bin/
+obj/
+.vs/
+*.user
+*.suo
+
+LIME_YOUR_PC.log
+LIME_YOUR_PC_crash.log
