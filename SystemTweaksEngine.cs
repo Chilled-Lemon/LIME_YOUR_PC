@@ -13,18 +13,34 @@ public sealed record SystemTweakSnapshot(
     bool? ToastNotificationsEnabled,
     bool? WindowsAutomaticUpdatesEnabled,
     bool? DefenderRealtimeProtectionEnabled,
-    bool? DefenderTamperProtectionEnabled);
+    bool? DefenderTamperProtectionEnabled,
+    bool? MemoryIntegrityConfiguredEnabled,
+    bool? MemoryIntegrityRunning,
+    bool? VirtualizationBasedSecurityConfiguredEnabled,
+    bool? VirtualizationBasedSecurityRunning,
+    bool? MemoryIntegrityLocked,
+    bool? VirtualizationBasedSecurityLocked);
 
-public sealed record TweakActionResult(bool Success, bool? ActualState, string Message);
+public sealed record TweakActionResult(
+    bool Success,
+    bool? ActualState,
+    string Message,
+    bool RestartRequired = false);
 
 /// <summary>
 /// Small, explicit Windows tweaks that are intentionally kept separate from the
 /// power-plan engine. Every tweak supports status readback and post-write verification.
+/// Security virtualization changes are configuration changes and require a reboot before
+/// their runtime state can be verified.
 /// </summary>
 public sealed class SystemTweaksEngine
 {
     private const string PushNotificationsKey = @"Software\Microsoft\Windows\CurrentVersion\PushNotifications";
     private const string WindowsUpdateAuKey = @"SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU";
+
+    private const string DeviceGuardPolicyKey = @"SOFTWARE\Policies\Microsoft\Windows\DeviceGuard";
+    private const string DeviceGuardRuntimeKey = @"SYSTEM\CurrentControlSet\Control\DeviceGuard";
+    private const string HvciRuntimeKey = @"SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity";
 
     private const uint SPI_GETMOUSE = 0x0003;
     private const uint SPI_SETMOUSE = 0x0004;
@@ -37,8 +53,20 @@ public sealed class SystemTweaksEngine
         bool? notifications = GetToastNotificationsState();
         bool? update = GetWindowsAutomaticUpdatesState();
         (bool? realtime, bool? tamper) = GetDefenderState();
+        DeviceGuardState deviceGuard = GetDeviceGuardState();
 
-        return new SystemTweakSnapshot(mouse, notifications, update, realtime, tamper);
+        return new SystemTweakSnapshot(
+            mouse,
+            notifications,
+            update,
+            realtime,
+            tamper,
+            deviceGuard.MemoryIntegrityConfiguredEnabled,
+            deviceGuard.MemoryIntegrityRunning,
+            deviceGuard.VirtualizationBasedSecurityConfiguredEnabled,
+            deviceGuard.VirtualizationBasedSecurityRunning,
+            deviceGuard.MemoryIntegrityLocked,
+            deviceGuard.VirtualizationBasedSecurityLocked);
     }
 
     public bool? GetEnhancePointerPrecisionState()
@@ -263,6 +291,208 @@ public sealed class SystemTweaksEngine
         }
     }
 
+    public DeviceGuardState GetDeviceGuardState()
+    {
+        try
+        {
+            int? hvciPolicy = ReadDword(DeviceGuardPolicyKey, "HypervisorEnforcedCodeIntegrity");
+            int? hvciRuntimeConfig = ReadDword(HvciRuntimeKey, "Enabled");
+            bool? hvciConfigured = hvciPolicy.HasValue
+                ? hvciPolicy.Value != 0
+                : hvciRuntimeConfig.HasValue ? hvciRuntimeConfig.Value != 0 : null;
+
+            int? vbsPolicy = ReadDword(DeviceGuardPolicyKey, "EnableVirtualizationBasedSecurity");
+            int? vbsRuntimeConfig = ReadDword(DeviceGuardRuntimeKey, "EnableVirtualizationBasedSecurity");
+            bool? vbsConfigured = vbsPolicy.HasValue
+                ? vbsPolicy.Value != 0
+                : vbsRuntimeConfig.HasValue ? vbsRuntimeConfig.Value != 0 : null;
+
+            bool hvciLocked = hvciPolicy == 1 || ReadDword(HvciRuntimeKey, "Locked") == 1;
+            bool vbsLocked = ReadDword(DeviceGuardRuntimeKey, "Locked") == 1;
+
+            (bool? hvciRunning, bool? vbsRunning) = GetDeviceGuardRuntimeState();
+
+            // On systems where Windows enabled these features automatically, a registry
+            // value may be absent. Runtime state is a useful fallback for the UI.
+            hvciConfigured ??= hvciRunning;
+            vbsConfigured ??= vbsRunning;
+
+            return new DeviceGuardState(
+                hvciConfigured,
+                hvciRunning,
+                vbsConfigured,
+                vbsRunning,
+                hvciLocked,
+                vbsLocked);
+        }
+        catch (Exception ex)
+        {
+            Log("Device Guard state read failed: " + ex);
+            return new DeviceGuardState(null, null, null, null, null, null);
+        }
+    }
+
+    public TweakActionResult SetMemoryIntegrity(bool enabled)
+    {
+        try
+        {
+            DeviceGuardState current = GetDeviceGuardState();
+            if (!enabled && current.MemoryIntegrityLocked == true)
+            {
+                return new TweakActionResult(
+                    false,
+                    current.MemoryIntegrityConfiguredEnabled,
+                    "检测到内存完整性 / HVCI 使用 UEFI 锁定。LIME 不会尝试绕过固件级保护，请通过 Windows 官方管理方式处理。",
+                    true);
+            }
+
+            using RegistryKey policy = Registry.LocalMachine.CreateSubKey(DeviceGuardPolicyKey, writable: true)
+                ?? throw new InvalidOperationException("无法打开 Device Guard 策略注册表项。");
+            using RegistryKey hvci = Registry.LocalMachine.CreateSubKey(HvciRuntimeKey, writable: true)
+                ?? throw new InvalidOperationException("无法打开 HVCI 注册表项。");
+
+            if (enabled)
+            {
+                // Policy value 2 = enabled without UEFI lock. Enabling HVCI requires VBS.
+                policy.SetValue("HypervisorEnforcedCodeIntegrity", 2, RegistryValueKind.DWord);
+                hvci.SetValue("Enabled", 1, RegistryValueKind.DWord);
+                hvci.SetValue("Locked", 0, RegistryValueKind.DWord);
+
+                policy.SetValue("EnableVirtualizationBasedSecurity", 1, RegistryValueKind.DWord);
+                using RegistryKey vbs = Registry.LocalMachine.CreateSubKey(DeviceGuardRuntimeKey, writable: true)
+                    ?? throw new InvalidOperationException("无法打开 VBS 注册表项。");
+                vbs.SetValue("EnableVirtualizationBasedSecurity", 1, RegistryValueKind.DWord);
+            }
+            else
+            {
+                policy.SetValue("HypervisorEnforcedCodeIntegrity", 0, RegistryValueKind.DWord);
+                hvci.SetValue("Enabled", 0, RegistryValueKind.DWord);
+            }
+
+            DeviceGuardState actual = GetDeviceGuardState();
+            bool verified = actual.MemoryIntegrityConfiguredEnabled == enabled;
+            string message = verified
+                ? enabled
+                    ? "已配置开启内存完整性 (HVCI)，并确保 VBS 配置为开启。需要重新启动 Windows 才能验证实际运行状态。"
+                    : "已配置关闭内存完整性 (HVCI)。需要重新启动 Windows 才能完全生效。"
+                : "HVCI 配置已写入，但重新读取后的配置状态与预期不一致。";
+
+            Log($"HVCI configured={enabled} actualConfig={actual.MemoryIntegrityConfiguredEnabled} running={actual.MemoryIntegrityRunning}");
+            return new TweakActionResult(verified, actual.MemoryIntegrityConfiguredEnabled, message, true);
+        }
+        catch (Exception ex)
+        {
+            Log("HVCI write failed: " + ex);
+            return new TweakActionResult(false, null, "修改内存完整性 (HVCI) 失败：" + ex.Message, true);
+        }
+    }
+
+    public TweakActionResult SetVirtualizationBasedSecurity(bool enabled)
+    {
+        try
+        {
+            DeviceGuardState current = GetDeviceGuardState();
+            if (!enabled && current.VirtualizationBasedSecurityLocked == true)
+            {
+                return new TweakActionResult(
+                    false,
+                    current.VirtualizationBasedSecurityConfiguredEnabled,
+                    "检测到 VBS 使用 UEFI / 固件级锁定。LIME 不会尝试绕过固件保护。",
+                    true);
+            }
+
+            if (!enabled && current.MemoryIntegrityLocked == true)
+            {
+                return new TweakActionResult(
+                    false,
+                    current.VirtualizationBasedSecurityConfiguredEnabled,
+                    "内存完整性 (HVCI) 当前使用 UEFI 锁定。由于 HVCI 依赖 VBS，LIME 不会强行关闭底层 VBS。",
+                    true);
+            }
+
+            using RegistryKey policy = Registry.LocalMachine.CreateSubKey(DeviceGuardPolicyKey, writable: true)
+                ?? throw new InvalidOperationException("无法打开 Device Guard 策略注册表项。");
+            using RegistryKey vbs = Registry.LocalMachine.CreateSubKey(DeviceGuardRuntimeKey, writable: true)
+                ?? throw new InvalidOperationException("无法打开 VBS 注册表项。");
+
+            policy.SetValue("EnableVirtualizationBasedSecurity", enabled ? 1 : 0, RegistryValueKind.DWord);
+            vbs.SetValue("EnableVirtualizationBasedSecurity", enabled ? 1 : 0, RegistryValueKind.DWord);
+
+            if (!enabled)
+            {
+                // HVCI depends on VBS. Keep the configuration internally consistent, but
+                // do not touch Credential Guard or other protected services.
+                policy.SetValue("HypervisorEnforcedCodeIntegrity", 0, RegistryValueKind.DWord);
+                using RegistryKey hvci = Registry.LocalMachine.CreateSubKey(HvciRuntimeKey, writable: true)
+                    ?? throw new InvalidOperationException("无法打开 HVCI 注册表项。");
+                hvci.SetValue("Enabled", 0, RegistryValueKind.DWord);
+            }
+
+            DeviceGuardState actual = GetDeviceGuardState();
+            bool verified = actual.VirtualizationBasedSecurityConfiguredEnabled == enabled;
+            string message = verified
+                ? enabled
+                    ? "已配置开启基于虚拟化的安全性 (VBS)。需要重新启动 Windows 才能验证实际运行状态。"
+                    : "已配置关闭 VBS，并同时将依赖 VBS 的 HVCI 配置为关闭。需要重新启动 Windows 才能完全生效；Credential Guard 或受管理策略仍可能使 VBS 保持运行。"
+                : "VBS 配置已写入，但重新读取后的配置状态与预期不一致。";
+
+            Log($"VBS configured={enabled} actualConfig={actual.VirtualizationBasedSecurityConfiguredEnabled} running={actual.VirtualizationBasedSecurityRunning}");
+            return new TweakActionResult(verified, actual.VirtualizationBasedSecurityConfiguredEnabled, message, true);
+        }
+        catch (Exception ex)
+        {
+            Log("VBS write failed: " + ex);
+            return new TweakActionResult(false, null, "修改 VBS 失败：" + ex.Message, true);
+        }
+    }
+
+    private (bool? MemoryIntegrityRunning, bool? VbsRunning) GetDeviceGuardRuntimeState()
+    {
+        const string command =
+            "$d=Get-CimInstance -ClassName Win32_DeviceGuard -Namespace root\\Microsoft\\Windows\\DeviceGuard -ErrorAction Stop; " +
+            "$v=[int]$d.VirtualizationBasedSecurityStatus; " +
+            "$h=(@($d.SecurityServicesRunning) -contains 2); " +
+            "Write-Output (([string]$v)+'|'+($h.ToString()))";
+
+        ProcessResult result = RunPowerShell(command, 8000);
+        if (result.ExitCode != 0)
+        {
+            Log("Device Guard runtime status unavailable: " + result.Output);
+            return (null, null);
+        }
+
+        string line = result.Output
+            .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+            .Select(x => x.Trim())
+            .FirstOrDefault(x => x.Contains('|')) ?? string.Empty;
+
+        string[] parts = line.Split('|');
+        if (parts.Length != 2 || !int.TryParse(parts[0], out int vbsStatus) || !bool.TryParse(parts[1], out bool hvciRunning))
+        {
+            Log("Device Guard runtime parse failed: " + result.Output);
+            return (null, null);
+        }
+
+        return (hvciRunning, vbsStatus == 2);
+    }
+
+    private static int? ReadDword(string subKey, string valueName)
+    {
+        using RegistryKey? key = Registry.LocalMachine.OpenSubKey(subKey, writable: false);
+        object? value = key?.GetValue(valueName);
+        if (value is null)
+            return null;
+
+        try
+        {
+            return Convert.ToInt32(value);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     private static TweakActionResult Fail(string message)
         => new(false, null, message);
 
@@ -333,6 +563,14 @@ public sealed class SystemTweaksEngine
             // Logging should never abort a tweak.
         }
     }
+
+    public sealed record DeviceGuardState(
+        bool? MemoryIntegrityConfiguredEnabled,
+        bool? MemoryIntegrityRunning,
+        bool? VirtualizationBasedSecurityConfiguredEnabled,
+        bool? VirtualizationBasedSecurityRunning,
+        bool? MemoryIntegrityLocked,
+        bool? VirtualizationBasedSecurityLocked);
 
     private sealed record ProcessResult(int ExitCode, string Output);
 

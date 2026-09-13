@@ -165,7 +165,9 @@ public partial class MainWindow : Window
         catch (Exception ex)
         {
             AppendLog("[TWEAK] 状态检测失败：" + ex.Message);
-            RenderSystemTweaks(new SystemTweakSnapshot(null, null, null, null, null));
+            RenderSystemTweaks(new SystemTweakSnapshot(
+                null, null, null, null, null,
+                null, null, null, null, null, null));
         }
     }
 
@@ -209,6 +211,72 @@ public partial class MainWindow : Window
             DefenderTweakButton.Content = snapshot.DefenderRealtimeProtectionEnabled == true ? "关闭" : "开启";
             DefenderTweakButton.IsEnabled = !_tweakRunning;
         }
+
+        RenderRestartTweakRow(
+            MemoryIntegrityTweakStatusText,
+            MemoryIntegrityTweakButton,
+            snapshot.MemoryIntegrityConfiguredEnabled,
+            snapshot.MemoryIntegrityRunning,
+            snapshot.MemoryIntegrityLocked,
+            "内存完整性");
+
+        RenderRestartTweakRow(
+            VbsTweakStatusText,
+            VbsTweakButton,
+            snapshot.VirtualizationBasedSecurityConfiguredEnabled,
+            snapshot.VirtualizationBasedSecurityRunning,
+            snapshot.VirtualizationBasedSecurityLocked,
+            "VBS");
+    }
+
+    private void RenderRestartTweakRow(
+        TextBlock statusText,
+        Button button,
+        bool? configured,
+        bool? running,
+        bool? locked,
+        string name)
+    {
+        bool? effective = configured ?? running;
+
+        if (effective is null)
+        {
+            statusText.Text = "不可用 / 无法读取";
+            button.Content = "不可用";
+            button.IsEnabled = false;
+            return;
+        }
+
+        if (locked == true)
+        {
+            statusText.Text = effective.Value
+                ? (running == true ? "开启 · UEFI 锁定" : "配置开启 · UEFI 锁定")
+                : "关闭 · UEFI 锁定";
+            button.Content = "已锁定";
+            button.IsEnabled = false;
+            return;
+        }
+
+        if (running is null)
+        {
+            statusText.Text = effective.Value
+                ? "配置开启 · 重启后确认"
+                : "配置关闭 · 重启后确认";
+        }
+        else if (configured.HasValue && configured.Value != running.Value)
+        {
+            statusText.Text = configured.Value
+                ? $"配置开启 · 当前{(running.Value ? "开启" : "关闭")} · 等待重启"
+                : $"配置关闭 · 当前{(running.Value ? "开启" : "关闭")} · 等待重启";
+        }
+        else
+        {
+            statusText.Text = running.Value ? "开启 · 当前已生效" : "关闭 · 当前已生效";
+        }
+
+        button.Content = effective.Value ? "关闭 · 重启" : "开启 · 重启";
+        button.IsEnabled = !_tweakRunning;
+        button.ToolTip = $"修改 {name} 后需要重新启动 Windows 才能验证实际运行状态。";
     }
 
     private void RenderTweakRow(
@@ -293,6 +361,60 @@ public partial class MainWindow : Window
             "Defender 实时保护");
     }
 
+    private async void MemoryIntegrityTweakButton_Click(object sender, RoutedEventArgs e)
+    {
+        bool? configured = _tweakSnapshot?.MemoryIntegrityConfiguredEnabled;
+        bool? running = _tweakSnapshot?.MemoryIntegrityRunning;
+        bool? current = configured ?? running;
+        if (current is null) return;
+
+        bool target = !current.Value;
+        if (!target)
+        {
+            MessageBoxResult confirm = MessageBox.Show(
+                "关闭内存完整性 (HVCI) 会降低 Windows 对内核模式代码的隔离与完整性保护。\n\n" +
+                "在部分电脑上可能减少虚拟化安全带来的额外开销，但性能收益并不保证。\n\n" +
+                "此修改需要重新启动 Windows 才能完全生效。\n\n" +
+                "继续关闭吗？",
+                "确认关闭内存完整性",
+                MessageBoxButton.YesNo,
+                MessageBoxImage.Warning);
+
+            if (confirm != MessageBoxResult.Yes) return;
+        }
+
+        await RunTweakAsync(
+            () => _tweaks.SetMemoryIntegrity(target),
+            "内存完整性 (HVCI)");
+    }
+
+    private async void VbsTweakButton_Click(object sender, RoutedEventArgs e)
+    {
+        bool? configured = _tweakSnapshot?.VirtualizationBasedSecurityConfiguredEnabled;
+        bool? running = _tweakSnapshot?.VirtualizationBasedSecurityRunning;
+        bool? current = configured ?? running;
+        if (current is null) return;
+
+        bool target = !current.Value;
+        if (!target)
+        {
+            MessageBoxResult confirm = MessageBox.Show(
+                "关闭基于虚拟化的安全性 (VBS) 会降低 Windows 的虚拟化隔离保护。\n\n" +
+                "由于 HVCI 依赖 VBS，LIME 会同时将 HVCI 配置为关闭；不会绕过 UEFI 锁，也不会主动修改 Credential Guard 的独立配置。\n\n" +
+                "此修改需要重新启动 Windows 才能完全生效。\n\n" +
+                "继续关闭吗？",
+                "确认关闭 VBS",
+                MessageBoxButton.YesNo,
+                MessageBoxImage.Warning);
+
+            if (confirm != MessageBoxResult.Yes) return;
+        }
+
+        await RunTweakAsync(
+            () => _tweaks.SetVirtualizationBasedSecurity(target),
+            "基于虚拟化的安全性 (VBS)");
+    }
+
     private async Task RunTweakAsync(Func<TweakActionResult> action, string name)
     {
         if (_tweakRunning) return;
@@ -305,11 +427,23 @@ public partial class MainWindow : Window
         {
             AppendLog($"[TWEAK] 正在修改：{name}…");
             TweakActionResult result = await Task.Run(action);
-            AppendLog(result.Success ? $"[TWEAK-PASS] {result.Message}" : $"[TWEAK-WARN] {result.Message}");
+            string logPrefix = result.Success
+                ? result.RestartRequired ? "[TWEAK-PENDING]" : "[TWEAK-PASS]"
+                : "[TWEAK-WARN]";
+            AppendLog($"{logPrefix} {result.Message}");
 
             if (!result.Success)
             {
                 MessageBox.Show(result.Message, "LIME_YOUR_PC", MessageBoxButton.OK, MessageBoxImage.Warning);
+            }
+            else if (result.RestartRequired)
+            {
+                AppendLog("[RESTART] 此项配置需要重新启动 Windows 才能完全生效。");
+                MessageBox.Show(
+                    result.Message + "\n\n当前不会自动重启电脑。请在方便时手动重新启动 Windows。",
+                    "需要重新启动",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Information);
             }
         }
         catch (Exception ex)

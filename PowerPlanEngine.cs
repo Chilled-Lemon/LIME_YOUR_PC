@@ -48,7 +48,7 @@ public sealed class PowerPlanEngine
 {
     public const string AppName = "LIME_YOUR_PC";
     private const string LegacyAppName = "LEMON_YOUR_PC";
-    public const string Version = "v0.5.1";
+    public const string Version = "v0.5.2";
     public static readonly string LogFile = Path.Combine(AppContext.BaseDirectory, AppName + ".log");
 
     private const string HighPerformanceGuid = "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c";

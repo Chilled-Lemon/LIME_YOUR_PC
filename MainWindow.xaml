@@ -47,7 +47,7 @@
                 </Border>
                 <StackPanel VerticalAlignment="Center">
                     <TextBlock Text="LIME_YOUR_PC" FontFamily="Segoe UI Semibold" FontSize="25"/>
-                    <TextBlock Text="Windows Gaming Optimizer · v0.5.1" Foreground="{StaticResource MutedTextBrush}" FontSize="12" Margin="0,3,0,0"/>
+                    <TextBlock Text="Windows Gaming Optimizer · v0.5.2" Foreground="{StaticResource MutedTextBrush}" FontSize="12" Margin="0,3,0,0"/>
                 </StackPanel>
             </StackPanel>
 
@@ -157,7 +157,7 @@
                                 <Button x:Name="UpdateTweakButton" Grid.Column="1" Content="—" Width="92" Padding="10,7" Style="{StaticResource GhostButtonStyle}" Click="UpdateTweakButton_Click" IsEnabled="False"/>
                             </Grid>
 
-                            <Grid>
+                            <Grid Margin="0,0,0,12">
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="*"/>
                                     <ColumnDefinition Width="Auto"/>
@@ -167,6 +167,43 @@
                                     <TextBlock x:Name="DefenderTweakStatusText" Text="检测中…" Foreground="{StaticResource MutedTextBrush}" FontSize="11" Margin="0,2,0,0" TextWrapping="Wrap"/>
                                 </StackPanel>
                                 <Button x:Name="DefenderTweakButton" Grid.Column="1" Content="—" Width="92" Padding="10,7" Style="{StaticResource GhostButtonStyle}" Click="DefenderTweakButton_Click" IsEnabled="False"/>
+                            </Grid>
+
+                            <Border Height="1" Background="{StaticResource BorderBrush}" Margin="0,0,0,12"/>
+                            <TextBlock Text="安全 / 高级" Foreground="{StaticResource MutedTextBrush}" FontFamily="Segoe UI Semibold" FontSize="11" Margin="0,0,0,10"/>
+
+                            <Grid Margin="0,0,0,10">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <StackPanel>
+                                    <StackPanel Orientation="Horizontal">
+                                        <TextBlock Text="内存完整性 (HVCI)" FontFamily="Segoe UI Semibold" VerticalAlignment="Center"/>
+                                        <Border Background="#332D1A" BorderBrush="#665B2A" BorderThickness="1" CornerRadius="6" Padding="6,2" Margin="7,0,0,0">
+                                            <TextBlock Text="需重启" Foreground="{StaticResource WarningBrush}" FontSize="9" FontFamily="Segoe UI Semibold"/>
+                                        </Border>
+                                    </StackPanel>
+                                    <TextBlock x:Name="MemoryIntegrityTweakStatusText" Text="检测中…" Foreground="{StaticResource MutedTextBrush}" FontSize="11" Margin="0,3,0,0" TextWrapping="Wrap"/>
+                                </StackPanel>
+                                <Button x:Name="MemoryIntegrityTweakButton" Grid.Column="1" Content="—" Width="112" Padding="10,7" Style="{StaticResource GhostButtonStyle}" Click="MemoryIntegrityTweakButton_Click" IsEnabled="False"/>
+                            </Grid>
+
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <StackPanel>
+                                    <StackPanel Orientation="Horizontal">
+                                        <TextBlock Text="基于虚拟化的安全性 (VBS)" FontFamily="Segoe UI Semibold" VerticalAlignment="Center"/>
+                                        <Border Background="#332D1A" BorderBrush="#665B2A" BorderThickness="1" CornerRadius="6" Padding="6,2" Margin="7,0,0,0">
+                                            <TextBlock Text="需重启" Foreground="{StaticResource WarningBrush}" FontSize="9" FontFamily="Segoe UI Semibold"/>
+                                        </Border>
+                                    </StackPanel>
+                                    <TextBlock x:Name="VbsTweakStatusText" Text="检测中…" Foreground="{StaticResource MutedTextBrush}" FontSize="11" Margin="0,3,0,0" TextWrapping="Wrap"/>
+                                </StackPanel>
+                                <Button x:Name="VbsTweakButton" Grid.Column="1" Content="—" Width="112" Padding="10,7" Style="{StaticResource GhostButtonStyle}" Click="VbsTweakButton_Click" IsEnabled="False"/>
                             </Grid>
                         </StackPanel>
                     </Border>
