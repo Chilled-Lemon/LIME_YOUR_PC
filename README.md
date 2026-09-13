@@ -11,7 +11,7 @@ LIME_YOUR_PC 会根据当前硬件平台创建并维护一个独立的高性能�
 ## ✨ LIME 简介
 
 <p align="center">
-  <img src="screenshots/main.png">
+  <img src="screenshots/main_v052.png" width="900">
 </p>
 
 LIME_YOUR_PC 以 Windows 电源计划优化为核心，并提供少量可独立开关的系统调整。
