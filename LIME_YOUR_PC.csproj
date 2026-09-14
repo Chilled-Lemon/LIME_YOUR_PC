@@ -7,15 +7,18 @@
     <Nullable>enable</Nullable>
     <AssemblyName>LIME_YOUR_PC</AssemblyName>
     <RootNamespace>LIME_YOUR_PC</RootNamespace>
-    <Version>0.6.1</Version>
-    <FileVersion>0.6.1.0</FileVersion>
-    <AssemblyVersion>0.6.1.0</AssemblyVersion>
+    <Version>0.6.4</Version>
+    <FileVersion>0.6.4.0</FileVersion>
+    <AssemblyVersion>0.6.4.0</AssemblyVersion>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <SelfContained>true</SelfContained>
     <PublishSingleFile>true</PublishSingleFile>
     <PublishTrimmed>false</PublishTrimmed>
     <DebugType>None</DebugType>
     <InvariantGlobalization>false</InvariantGlobalization>
+    <!-- Keep only .NET/WPF satellite resources needed by LIME.
+         The app UI itself is currently Chinese-first; English remains as the framework fallback. -->
+    <SatelliteResourceLanguages>zh-Hans;en</SatelliteResourceLanguages>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>Assets\LIME_YOUR_PC.ico</ApplicationIcon>
   </PropertyGroup>

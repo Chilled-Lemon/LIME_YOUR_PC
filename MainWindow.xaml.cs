@@ -10,26 +10,21 @@ public partial class MainWindow : Window
 {
     private readonly PowerPlanEngine _engine = new();
     private readonly SystemTweaksEngine _tweaks = new();
-    private readonly LatencyBenchmarkEngine _benchmark = new();
 
     private HardwareInfo? _hardware;
     private SystemTweakSnapshot? _tweakSnapshot;
-    private LatencyBenchmarkResult? _lastBenchmark;
-    private LatencyBenchmarkResult? _savedBaseline;
-    private string? _lastManualBenchmarkPlanGuid;
-    private bool _lastBenchmarkWasManual;
 
     private bool _running;
     private bool _tweakRunning;
-    private bool _benchmarkRunning;
+    private bool _statusRefreshing;
 
-    private bool IsBusy => _running || _tweakRunning || _benchmarkRunning;
+    private bool IsBusy => _running || _tweakRunning;
 
     public MainWindow()
     {
         InitializeComponent();
         ApplyButton.IsEnabled = false;
-        RunBenchmarkButton.IsEnabled = false;
+        RefreshOptimizationStatusButton.IsEnabled = false;
         Loaded += MainWindow_Loaded;
     }
 
@@ -57,8 +52,6 @@ public partial class MainWindow : Window
 
     private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
     {
-        LoadBenchmarkBaseline();
-
         try
         {
             SetStatus("正在检测硬件", "正在检测", Brushes.Gold);
@@ -68,28 +61,6 @@ public partial class MainWindow : Window
             SetStatus("准备就绪", "准备就绪", FindBrush("SuccessBrush"));
             AppendLog($"硬件检测完成：{_hardware.CpuName}");
             AppendLog("程序只会修改 AC 白名单；DC/电池参数不会写入。");
-
-            try
-            {
-                PowerPlanContext powerContext = await Task.Run(() => _engine.GetPowerPlanContext(refreshMetadata: true));
-                if (powerContext.LimePlanExists)
-                {
-                    if (powerContext.LimePlanIsActive)
-                    {
-                        ApplyButton.Content = "▶  重新应用 LIME 优化";
-                        AppendLog($"[POWER] 当前正在使用 LIME_YOUR_PC，计划说明已同步至 {PowerPlanEngine.Version}。");
-                    }
-                    else
-                    {
-                        ApplyButton.Content = "▶  切换并应用 LIME 优化";
-                        AppendLog($"[POWER] 检测到既存 LIME_YOUR_PC 计划；当前使用“{powerContext.ActivePlanName}”。");
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                AppendLog("[POWER-WARN] 无法刷新电源计划说明：" + ex.Message);
-            }
         }
         catch (Exception ex)
         {
@@ -98,7 +69,186 @@ public partial class MainWindow : Window
         }
 
         await RefreshSystemTweaksAsync();
+        await RefreshOptimizationStatusAsync(logDetails: true);
         UpdateInteractionState();
+    }
+
+    private async void RefreshOptimizationStatusButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (IsBusy || _statusRefreshing || _hardware is null) return;
+        await RefreshOptimizationStatusAsync(logDetails: true);
+    }
+
+    private async Task RefreshOptimizationStatusAsync(bool logDetails = false)
+    {
+        if (_hardware is null) return;
+
+        _statusRefreshing = true;
+        OptimizationStatusBadgeText.Text = "正在检测";
+        OptimizationStatusBadgeText.Foreground = FindBrush("WarningBrush");
+        OptimizationConclusionText.Text = "正在读取当前活动电源计划与关键参数…";
+        OptimizationDetailsText.Text = string.Empty;
+        UpdateInteractionState();
+
+        try
+        {
+            (PowerPlanContext Context, OptimizationAssessment Assessment) state = await Task.Run(() =>
+            {
+                PowerPlanContext context = _engine.GetPowerPlanContext(refreshMetadata: true);
+                OptimizationAssessment assessment = _engine.AssessCurrentPlan(_hardware);
+                return (context, assessment);
+            });
+
+            RenderOptimizationStatus(state.Context, state.Assessment);
+            UpdateApplyButtonText(state.Context);
+
+            if (logDetails)
+            {
+                AppendLog($"[STATUS] 当前电源计划：{state.Context.ActivePlanName}；" +
+                          $"关键参数 {state.Assessment.MatchingCount}/{state.Assessment.SupportedCount} 已符合；" +
+                          $"待调整 {state.Assessment.DifferentCount}；不适用/无法读取 {state.Assessment.UnsupportedCount}。");
+            }
+        }
+        catch (Exception ex)
+        {
+            OptimizationStatusBadgeText.Text = "状态不可用";
+            OptimizationStatusBadgeText.Foreground = FindBrush("WarningBrush");
+            OptimizationPlanText.Text = "无法读取";
+            OptimizationParamsText.Text = "—";
+            OptimizationSchedulingText.Text = "—";
+            OptimizationSchedulingText.Foreground = FindBrush("MutedTextBrush");
+            OptimizationLimePlanText.Text = "—";
+            OptimizationConclusionText.Text = "无法完整读取当前电源配置；其他可用功能仍可继续使用。";
+            OptimizationDetailsText.Text = ex.Message;
+            AppendLog("[STATUS-WARN] 无法刷新优化状态：" + ex.Message);
+        }
+        finally
+        {
+            _statusRefreshing = false;
+            UpdateInteractionState();
+        }
+    }
+
+    private void RenderOptimizationStatus(PowerPlanContext context, OptimizationAssessment assessment)
+    {
+        OptimizationPlanText.Text = context.LimePlanIsActive
+            ? "LIME_YOUR_PC（当前使用）"
+            : context.ActivePlanName;
+
+        if (assessment.SupportedCount > 0)
+        {
+            OptimizationParamsText.Text = $"{assessment.MatchingCount}/{assessment.SupportedCount} 已符合";
+            if (assessment.UnsupportedCount > 0)
+                OptimizationParamsText.Text += $" · {assessment.UnsupportedCount} 不适用";
+        }
+        else
+        {
+            OptimizationParamsText.Text = "无法读取";
+        }
+
+        string schedulingName = GetSchedulingPolicyDisplayName(_hardware!);
+        const string schedulingSettingName = "异类线程调度策略";
+        if (assessment.MatchingSettings.Contains(schedulingSettingName))
+        {
+            OptimizationSchedulingText.Text = schedulingName + " · 已匹配";
+            OptimizationSchedulingText.Foreground = FindBrush("SuccessBrush");
+        }
+        else if (assessment.DifferentSettings.Contains(schedulingSettingName))
+        {
+            OptimizationSchedulingText.Text = schedulingName + " · 待调整";
+            OptimizationSchedulingText.Foreground = FindBrush("WarningBrush");
+        }
+        else
+        {
+            OptimizationSchedulingText.Text = schedulingName + " · 此平台不可读取";
+            OptimizationSchedulingText.Foreground = FindBrush("MutedTextBrush");
+        }
+
+        OptimizationLimePlanText.Text = context.LimePlanIsActive
+            ? $"已启用 · {PowerPlanEngine.Version}"
+            : context.LimePlanExists
+                ? "已存在 · 当前未启用"
+                : "尚未创建";
+
+        string conclusion;
+        string badge;
+        Brush badgeBrush;
+
+        if (assessment.SupportedCount <= 0)
+        {
+            badge = "读取不完整";
+            badgeBrush = FindBrush("WarningBrush");
+            conclusion = "无法读取足够的关键电源参数，暂时不能判断当前配置是否符合 LIME 推荐值。";
+        }
+        else if (context.LimePlanIsActive && assessment.DifferentCount == 0)
+        {
+            badge = "已高度优化";
+            badgeBrush = FindBrush("SuccessBrush");
+            conclusion = "当前 LIME_YOUR_PC 已符合可读取的推荐配置。";
+        }
+        else if (context.LimePlanIsActive)
+        {
+            badge = "需要刷新";
+            badgeBrush = FindBrush("WarningBrush");
+            conclusion = $"当前正在使用 LIME_YOUR_PC，但检测到 {assessment.DifferentCount} 项关键参数需要恢复到当前硬件的推荐值。";
+        }
+        else if (context.LimePlanExists)
+        {
+            badge = "LIME 未启用";
+            badgeBrush = FindBrush("WarningBrush");
+            conclusion = "电脑中已经存在 LIME_YOUR_PC，但当前没有使用它。应用优化时会切换至既存计划，并重新写入和验证白名单参数。";
+        }
+        else if (assessment.DifferentCount == 0)
+        {
+            badge = "参数已匹配";
+            badgeBrush = FindBrush("SuccessBrush");
+            conclusion = "当前电源计划的可读取关键参数已经高度符合 LIME 目标；应用后仍会创建独立 LIME 计划，方便单独管理和恢复。";
+        }
+        else
+        {
+            badge = "检测到可优化项";
+            badgeBrush = FindBrush("WarningBrush");
+            conclusion = $"当前计划还有 {assessment.DifferentCount} 项关键参数与 LIME 推荐值不同。应用优化后会创建或切换至独立 LIME 电源计划。";
+        }
+
+        OptimizationStatusBadgeText.Text = badge;
+        OptimizationStatusBadgeText.Foreground = badgeBrush;
+        OptimizationConclusionText.Text = conclusion;
+
+        var detailParts = new List<string>();
+        if (assessment.DifferentSettings.Count > 0)
+        {
+            string items = string.Join("、", assessment.DifferentSettings.Take(4));
+            if (assessment.DifferentSettings.Count > 4) items += "…";
+            detailParts.Add("待优化：" + items);
+        }
+        if (assessment.UnsupportedSettings.Count > 0)
+        {
+            string items = string.Join("、", assessment.UnsupportedSettings.Take(3));
+            if (assessment.UnsupportedSettings.Count > 3) items += "…";
+            detailParts.Add("不适用 / 无法读取：" + items);
+        }
+        if (detailParts.Count == 0)
+            detailParts.Add("所有可读取的关键电源参数均已符合目标。 ");
+
+        OptimizationDetailsText.Text = string.Join("  ·  ", detailParts);
+    }
+
+    private static string GetSchedulingPolicyDisplayName(HardwareInfo hw)
+        => PowerPlanEngine.GetSchedulingValue(hw) switch
+        {
+            0 => "全部处理器",
+            2 => "优先高性能处理器",
+            _ => "高性能处理器"
+        };
+
+    private void UpdateApplyButtonText(PowerPlanContext context)
+    {
+        ApplyButton.Content = context.LimePlanIsActive
+            ? "▶  重新应用 LIME 优化"
+            : context.LimePlanExists
+                ? "▶  切换并应用 LIME 优化"
+                : "▶  应用 LIME 优化";
     }
 
     private async void ApplyButton_Click(object sender, RoutedEventArgs e)
@@ -128,10 +278,9 @@ public partial class MainWindow : Window
                                   assessment is not null &&
                                   assessment.SupportedCount > 0 &&
                                   assessment.DifferentCount == 0;
-        bool reuseManualBenchmark = !alreadyOptimalLime && CanReuseLastManualBenchmark(planContext);
 
         MessageBoxResult confirm = MessageBox.Show(
-            BuildApplyConfirmMessage(planContext, alreadyOptimalLime, reuseManualBenchmark),
+            BuildApplyConfirmMessage(planContext, assessment, alreadyOptimalLime),
             "确认应用",
             MessageBoxButton.YesNo,
             MessageBoxImage.Question);
@@ -143,51 +292,18 @@ public partial class MainWindow : Window
         LogText.Text = string.Empty;
         UpdateInteractionState();
 
-        LatencyBenchmarkResult? before = null;
-        LatencyBenchmarkResult? after = null;
-        OptimizationResult? optimization = null;
-
         try
         {
             if (assessment is not null)
                 AppendAssessmentLog(assessment);
 
-            if (alreadyOptimalLime)
-            {
-                ApplyButton.Content = "正在验证 LIME 配置…";
-                SummaryText.Text = "当前 LIME 配置已符合目标，正在刷新版本信息并验证…";
-                SetStatus("正在验证现有配置", "验证中", FindBrush("WarningBrush"));
-                AppendLog("[BENCH] 当前已使用 LIME_YOUR_PC，且支持的关键参数均符合目标；跳过自动 A/B，避免重复测试制造无意义波动。");
-            }
-            else if (reuseManualBenchmark && _lastBenchmark is not null)
-            {
-                before = _lastBenchmark;
-                _lastBenchmarkWasManual = false;
-                ApplyButton.Content = "正在应用 LIME 优化…";
-                SummaryText.Text = "已复用刚才的测试作为优化前基准…";
-                SetStatus("已复用当前测试", "准备优化", FindBrush("WarningBrush"));
-                RenderBenchmarkResult(before, "已复用刚才的“当前状态”测试作为优化前基准，不再重复测试。 ");
-                AppendLog("[BENCH] 已复用刚才的基础测试作为优化前基准，不重复执行优化前测试。 ");
-            }
-            else
-            {
-                ApplyButton.Content = "正在进行优化前测试…";
-                SummaryText.Text = planContext.LimePlanExists && !planContext.LimePlanIsActive
-                    ? $"正在测量“{planContext.ActivePlanName}”作为切换前基准…"
-                    : "正在建立优化前基准…";
-                SetStatus("正在建立优化前基准", "测试中", FindBrush("WarningBrush"));
-
-                before = await RunBenchmarkCoreAsync("优化前基准", renderAsCurrent: true);
-                _lastBenchmarkWasManual = false;
-                if (before is null)
-                    AppendLog("[BENCH-WARN] 优化前测试失败，将继续执行电源优化。 ");
-            }
-
-            ApplyButton.Content = "正在应用 LIME 优化…";
-            SummaryText.Text = planContext.LimePlanExists && !planContext.LimePlanIsActive
-                ? "正在切换至既存 LIME 电源计划并刷新参数…"
-                : "正在应用电源参数…";
-            SetStatus("正在应用优化", "正在运行", FindBrush("WarningBrush"));
+            ApplyButton.Content = alreadyOptimalLime ? "正在重新验证 LIME 配置…" : "正在应用 LIME 优化…";
+            SummaryText.Text = alreadyOptimalLime
+                ? "当前配置已符合目标，正在刷新版本信息并重新验证…"
+                : planContext.LimePlanExists && !planContext.LimePlanIsActive
+                    ? "正在切换至既存 LIME 电源计划并刷新参数…"
+                    : "正在应用电源参数…";
+            SetStatus(alreadyOptimalLime ? "正在验证现有配置" : "正在应用优化", alreadyOptimalLime ? "验证中" : "正在运行", FindBrush("WarningBrush"));
 
             var progress = new Progress<EngineProgress>(p =>
             {
@@ -195,48 +311,13 @@ public partial class MainWindow : Window
                 AppendLog(p.Message);
             });
 
-            optimization = await Task.Run(() => _engine.Apply(_hardware, progress));
+            OptimizationResult optimization = await Task.Run(() => _engine.Apply(_hardware, progress));
             MainProgress.Value = 100;
-
-            string scenarioNote = BuildPowerPlanScenarioNote(planContext);
-
-            if (!alreadyOptimalLime)
-            {
-                // Give power-policy notifications a moment to settle before the second run.
-                await Task.Delay(900);
-
-                ApplyButton.Content = "正在进行优化后测试…";
-                SummaryText.Text = "优化完成，正在测量优化后响应…";
-                SetStatus("正在进行优化后测试", "测试中", FindBrush("WarningBrush"));
-
-                after = await RunBenchmarkCoreAsync("优化后测试", renderAsCurrent: true);
-                _lastBenchmarkWasManual = false;
-
-                if (before is not null && after is not null)
-                {
-                    LatencyComparison comparison = LatencyBenchmarkEngine.Compare(before, after);
-                    RenderBenchmarkComparison(before, after, comparison, assessment, scenarioNote);
-                    AppendComparisonLog(before, after, comparison, assessment, scenarioNote);
-                }
-                else if (after is not null)
-                {
-                    RenderBenchmarkResult(after, $"{scenarioNote}。优化后测试完成；由于切换前基准不可用，无法计算 A/B 变化。 ");
-                }
-            }
-            else
-            {
-                BenchmarkBadgeText.Text = "无需重复测试";
-                BenchmarkBadgeText.Foreground = FindBrush("SuccessBrush");
-                BenchmarkConclusionText.Text =
-                    "当前已经使用 LIME_YOUR_PC，且支持的关键电源参数均已符合推荐值。本次仅刷新版本说明并重新验证，因此自动 A/B 已跳过；你仍可随时手动测试当前状态。";
-                BenchmarkEnvironmentText.Text = "避免把正常测试波动误判为“优化提升”";
-            }
-
             SummaryText.Text = BuildOptimizationSummary(optimization, assessment, planContext);
 
             if (optimization.MismatchCount == 0)
             {
-                SetStatus(alreadyOptimalLime ? "当前配置已符合目标" : "优化与测试完成", "已完成", FindBrush("SuccessBrush"));
+                SetStatus("优化配置已验证", "已完成", FindBrush("SuccessBrush"));
                 AppendLog($"[DONE] 当前计划：{optimization.PlanGuid}");
             }
             else
@@ -255,224 +336,9 @@ public partial class MainWindow : Window
         finally
         {
             _running = false;
-            ApplyButton.Content = "▶  重新应用 LIME 优化";
             UpdateInteractionState();
+            await RefreshOptimizationStatusAsync(logDetails: false);
         }
-    }
-
-    private async void RunBenchmarkButton_Click(object sender, RoutedEventArgs e)
-    {
-        if (IsBusy) return;
-
-        LatencyBenchmarkResult? result = await RunBenchmarkCoreAsync("基础测试", renderAsCurrent: true);
-        if (result is null) return;
-
-        _lastBenchmark = result;
-        _lastBenchmarkWasManual = true;
-        try
-        {
-            _lastManualBenchmarkPlanGuid = _engine.GetPowerPlanContext().ActivePlanGuid;
-        }
-        catch
-        {
-            _lastManualBenchmarkPlanGuid = null;
-        }
-
-        if (_savedBaseline is not null && !ReferenceEquals(_savedBaseline, result))
-        {
-            LatencyComparison comparison = LatencyBenchmarkEngine.Compare(_savedBaseline, result);
-            RenderBenchmarkComparison(_savedBaseline, result, comparison, assessment: null);
-            AppendComparisonLog(_savedBaseline, result, comparison, assessment: null);
-        }
-        else
-        {
-            RenderBenchmarkResult(
-                result,
-                "当前状态测试完成。若现在执行一键优化，LIME 会直接复用本次结果作为优化前基准，不重复测试；只有跨重启或手动调整时才需要保存对比基准。 ");
-        }
-
-        UpdateInteractionState();
-    }
-
-    private async Task<LatencyBenchmarkResult?> RunBenchmarkCoreAsync(
-        string phase,
-        bool renderAsCurrent)
-    {
-        if (_benchmarkRunning) return null;
-
-        _benchmarkRunning = true;
-        BenchmarkProgressBar.Value = 0;
-        BenchmarkBadgeText.Text = "测试中";
-        BenchmarkBadgeText.Foreground = FindBrush("WarningBrush");
-        BenchmarkConclusionText.Text = $"{phase}：正在采样 Windows 定时唤醒与线程调度响应…";
-        UpdateInteractionState();
-
-        var progress = new Progress<BenchmarkProgress>(p =>
-        {
-            BenchmarkProgressBar.Value = p.Percent;
-            BenchmarkEnvironmentText.Text = p.Message;
-        });
-
-        try
-        {
-            AppendLog($"[BENCH] 开始 {phase}（{LatencyBenchmarkEngine.DefaultDurationSeconds} 秒）…");
-            LatencyBenchmarkResult result = await Task.Run(() =>
-                _benchmark.Run(LatencyBenchmarkEngine.DefaultDurationSeconds, progress));
-
-            _lastBenchmark = result;
-            BenchmarkProgressBar.Value = 100;
-            BenchmarkBadgeText.Text = "测试完成";
-            BenchmarkBadgeText.Foreground = FindBrush("SuccessBrush");
-
-            if (renderAsCurrent)
-                RenderBenchmarkResult(result, $"{phase}完成。 ");
-
-            AppendBenchmarkLog(phase, result);
-            return result;
-        }
-        catch (Exception ex)
-        {
-            BenchmarkBadgeText.Text = "测试失败";
-            BenchmarkBadgeText.Foreground = FindBrush("ErrorBrush");
-            BenchmarkConclusionText.Text = "系统响应测试失败；这不会阻止其他 LIME 功能使用。";
-            BenchmarkEnvironmentText.Text = ex.Message;
-            AppendLog($"[BENCH-ERROR] {phase}：{ex.Message}");
-            return null;
-        }
-        finally
-        {
-            _benchmarkRunning = false;
-            UpdateInteractionState();
-        }
-    }
-
-    private void SaveBenchmarkBaselineButton_Click(object sender, RoutedEventArgs e)
-    {
-        if (IsBusy || _lastBenchmark is null) return;
-
-        try
-        {
-            LatencyBenchmarkStore.SaveBaseline(_lastBenchmark);
-            _savedBaseline = _lastBenchmark;
-            RenderBaselineStatus();
-            BenchmarkConclusionText.Text = "已保存当前测试作为跨重启 / 手动调整的对比基准。修改 VBS、HVCI 等设置并重启后，再运行一次测试即可比较。";
-            AppendLog("[BENCH] 已保存跨重启 / 手动调整对比基准。 ");
-        }
-        catch (Exception ex)
-        {
-            MessageBox.Show("保存测试基准失败：" + ex.Message, "LIME_YOUR_PC", MessageBoxButton.OK, MessageBoxImage.Warning);
-        }
-    }
-
-    private void LoadBenchmarkBaseline()
-    {
-        _savedBaseline = LatencyBenchmarkStore.LoadBaseline();
-        RenderBaselineStatus();
-    }
-
-    private void RenderBaselineStatus()
-    {
-        if (BenchmarkBaselineText is null) return;
-
-        if (_savedBaseline is null)
-        {
-            BenchmarkBaselineText.Text = "跨重启对比基准：未保存（仅在 VBS / HVCI 等场景需要）";
-            return;
-        }
-
-        BenchmarkBaselineText.Text =
-            $"跨重启对比基准：{_savedBaseline.Timestamp:MM-dd HH:mm} · 平均 {FormatMs(_savedBaseline.AverageResponseMs)}";
-    }
-
-    private void RenderBenchmarkResult(LatencyBenchmarkResult result, string conclusion)
-    {
-        BenchmarkAverageText.Text = FormatMs(result.AverageResponseMs);
-        BenchmarkOccasionalText.Text = FormatMs(result.OccasionalResponseMs);
-        BenchmarkJitterText.Text = FormatMs(result.ResponseJitterMs);
-        BenchmarkWorstText.Text = FormatMs(result.WorstSpikeMs);
-        BenchmarkConclusionText.Text = conclusion.Trim();
-        BenchmarkEnvironmentText.Text =
-            $"CPU {result.SystemCpuUsagePercent:0.#}% · {result.ProcessCount} 个进程 · " +
-            (result.HighResolutionTimerUsed ? "高精度计时" : "兼容计时");
-        BenchmarkBadgeText.Text = "测试完成";
-        BenchmarkBadgeText.Foreground = FindBrush("SuccessBrush");
-    }
-
-    private void RenderBenchmarkComparison(
-        LatencyBenchmarkResult before,
-        LatencyBenchmarkResult after,
-        LatencyComparison comparison,
-        OptimizationAssessment? assessment,
-        string? scenarioNote = null)
-    {
-        BenchmarkAverageText.Text = $"{FormatMs(after.AverageResponseMs)}  {FormatChange(comparison.ResponseImprovementPercent, comparison.ResponseChangeMeaningful)}";
-        BenchmarkOccasionalText.Text = FormatMs(after.OccasionalResponseMs);
-        BenchmarkJitterText.Text = $"{FormatMs(after.ResponseJitterMs)}  {FormatChange(comparison.JitterImprovementPercent, comparison.JitterChangeMeaningful)}";
-        BenchmarkWorstText.Text = FormatMs(after.WorstSpikeMs);
-        BenchmarkConclusionText.Text = BuildBenchmarkConclusion(before, after, comparison, assessment, scenarioNote);
-        BenchmarkEnvironmentText.Text = comparison.EnvironmentComparable
-            ? $"{comparison.EnvironmentNote} · 优化后 CPU {after.SystemCpuUsagePercent:0.#}%"
-            : "⚠ " + comparison.EnvironmentNote + "，建议再测一次";
-        BenchmarkBadgeText.Text = comparison.EnvironmentComparable ? "A/B 完成" : "结果需复测";
-        BenchmarkBadgeText.Foreground = comparison.EnvironmentComparable
-            ? FindBrush("SuccessBrush")
-            : FindBrush("WarningBrush");
-    }
-
-    private static string BuildBenchmarkConclusion(
-        LatencyBenchmarkResult before,
-        LatencyBenchmarkResult after,
-        LatencyComparison comparison,
-        OptimizationAssessment? assessment,
-        string? scenarioNote = null)
-    {
-        string responseText;
-        if (!comparison.ResponseChangeMeaningful)
-        {
-            responseText = "未检测到明显的平均响应变化";
-        }
-        else if (comparison.ResponseImprovementPercent > 0)
-        {
-            responseText = $"系统响应场景下，平均调度响应延迟降低约 {comparison.ResponseImprovementPercent:0.#}%";
-        }
-        else
-        {
-            responseText = $"本次平均调度响应延迟上升约 {Math.Abs(comparison.ResponseImprovementPercent):0.#}%";
-        }
-
-        string jitterText;
-        if (!comparison.JitterChangeMeaningful)
-        {
-            jitterText = "响应抖动无明显变化";
-        }
-        else if (comparison.JitterImprovementPercent > 0)
-        {
-            jitterText = $"响应抖动降低约 {comparison.JitterImprovementPercent:0.#}%";
-        }
-        else
-        {
-            jitterText = $"响应抖动上升约 {Math.Abs(comparison.JitterImprovementPercent):0.#}%";
-        }
-
-        string configText = string.Empty;
-        if (assessment is not null && assessment.SupportedCount > 0)
-        {
-            if (assessment.MatchRatio >= 0.999 && !comparison.ResponseChangeMeaningful && !comparison.JitterChangeMeaningful)
-            {
-                configText = $" 优化前 {assessment.MatchingCount}/{assessment.SupportedCount} 项已符合 LIME 推荐值，你的电源配置本来就已经符合优化目标，因此没有明显变化属于预期结果。";
-            }
-            else if (assessment.MatchRatio >= 0.80 && !comparison.ResponseChangeMeaningful && !comparison.JitterChangeMeaningful)
-            {
-                configText = $" 优化前已有 {assessment.MatchingCount}/{assessment.SupportedCount} 项符合 LIME 推荐值，当前电源配置已经高度优化，因此变化较小属于正常现象。";
-            }
-        }
-
-        string environmentText = comparison.EnvironmentComparable
-            ? string.Empty
-            : " 两次测试环境差异较大，本次百分比仅供参考。";
-
-        string scenarioText = string.IsNullOrWhiteSpace(scenarioNote) ? string.Empty : scenarioNote.TrimEnd('。') + "。 ";
-        return $"{scenarioText}{responseText}（{FormatMs(before.AverageResponseMs)} → {FormatMs(after.AverageResponseMs)}）；{jitterText}。{configText}{environmentText}".Trim();
     }
 
     private static string BuildOptimizationSummary(
@@ -480,75 +346,64 @@ public partial class MainWindow : Window
         OptimizationAssessment? assessment,
         PowerPlanContext planContext)
     {
+        if (planContext.LimePlanIsActive &&
+            assessment is not null &&
+            assessment.SupportedCount > 0 &&
+            assessment.DifferentCount == 0)
+        {
+            return $"当前配置已符合 LIME 推荐值 · 已检查 {assessment.SupportedCount} 项 · 不适用 {assessment.UnsupportedCount} 项 · 验证异常 {optimization.MismatchCount}";
+        }
+
         string prefix = !planContext.LimePlanIsActive
             ? (planContext.LimePlanExists ? "已切换既存 LIME · " : "已创建并切换 LIME · ")
             : string.Empty;
 
-        string main = $"{prefix}成功 {optimization.SuccessCount} · 跳过 {optimization.SkippedCount} · 验证异常 {optimization.MismatchCount}";
+        string main = $"{prefix}写入成功 {optimization.SuccessCount} · 不适用/跳过 {optimization.SkippedCount} · 验证异常 {optimization.MismatchCount}";
         if (assessment is not null && assessment.SupportedCount > 0)
             main += $" · 优化前已符合 {assessment.MatchingCount}/{assessment.SupportedCount}";
         return main;
     }
 
-    private bool CanReuseLastManualBenchmark(PowerPlanContext context)
-    {
-        if (!_lastBenchmarkWasManual || _lastBenchmark is null) return false;
-        if (DateTime.Now - _lastBenchmark.Timestamp > TimeSpan.FromMinutes(10)) return false;
-        if (string.IsNullOrWhiteSpace(context.ActivePlanGuid) || string.IsNullOrWhiteSpace(_lastManualBenchmarkPlanGuid)) return false;
-
-        return context.ActivePlanGuid.Equals(_lastManualBenchmarkPlanGuid, StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static string BuildPowerPlanScenarioNote(PowerPlanContext context)
-    {
-        if (context.LimePlanIsActive)
-            return "同一 LIME_YOUR_PC 电源计划的参数刷新前后对比";
-
-        return context.LimePlanExists
-            ? $"已从“{context.ActivePlanName}”切换至既存的 LIME_YOUR_PC 电源计划"
-            : $"已从“{context.ActivePlanName}”切换至新创建的 LIME_YOUR_PC 电源计划";
-    }
-
     private static string BuildApplyConfirmMessage(
         PowerPlanContext context,
-        bool alreadyOptimalLime,
-        bool reuseManualBenchmark)
+        OptimizationAssessment? assessment,
+        bool alreadyOptimalLime)
     {
+        string assessmentText = assessment is not null && assessment.SupportedCount > 0
+            ? $"当前可读取的关键参数中，已有 {assessment.MatchingCount}/{assessment.SupportedCount} 项符合 LIME 推荐值。\n\n"
+            : string.Empty;
+
         if (alreadyOptimalLime)
         {
             return
-                $"当前已经使用 LIME_YOUR_PC，且可读取的关键电源参数已符合推荐值。\n\n" +
-                $"本次将刷新电源计划说明至 {PowerPlanEngine.Version} 并重新验证参数，不再自动重复 A/B 测试。\n\n" +
+                $"当前已经使用 LIME_YOUR_PC，且可读取的关键电源参数均已符合推荐值。\n\n" +
+                $"本次只会将计划说明刷新至 {PowerPlanEngine.Version}，重新写入白名单并验证结果。\n\n" +
                 "• 仅修改 / 验证 AC（接通电源）参数\n" +
                 "• DC / 电池参数保持不变\n" +
                 "• 不删除原有电源计划\n\n继续吗？";
         }
 
-        string testText = reuseManualBenchmark
-            ? $"检测到你刚完成的“当前状态”测试，将直接复用为优化前基准；应用后只再测试约 {LatencyBenchmarkEngine.DefaultDurationSeconds} 秒。"
-            : $"将自动进行一次优化前测试和一次优化后测试，每次约 {LatencyBenchmarkEngine.DefaultDurationSeconds} 秒。";
-
         string planText;
         if (context.LimePlanExists && !context.LimePlanIsActive)
         {
             planText = $"当前使用“{context.ActivePlanName}”，同时检测到既存 LIME_YOUR_PC 计划。\n" +
-                       "LIME 会先记录当前计划的响应，再切换至既存 LIME 计划并进行优化后对比。";
+                       "LIME 会直接切换至既存计划，再按当前硬件刷新和验证白名单参数。";
         }
         else if (!context.LimePlanExists)
         {
-            planText = $"当前使用“{context.ActivePlanName}”。LIME 将创建专用电源计划并与当前计划进行前后对比。";
+            planText = $"当前使用“{context.ActivePlanName}”。LIME 将创建独立的 LIME_YOUR_PC 电源计划，并只修改明确的 AC 白名单参数。";
         }
         else
         {
-            planText = "将刷新当前 LIME_YOUR_PC 电源计划的白名单参数，并进行前后对比。";
+            planText = "将刷新当前 LIME_YOUR_PC 电源计划的白名单参数并重新验证。";
         }
 
         return
-            $"{planText}\n\n{testText}\n\n" +
+            $"{planText}\n\n{assessmentText}" +
             "• 仅修改 AC（接通电源）参数\n" +
             "• DC / 电池参数保持不变\n" +
-            "• 不删除原有电源计划\n\n" +
-            "测试衡量 Windows 软件侧调度响应，不代表鼠标到显示器的端到端输入延迟。\n\n" +
+            "• 不删除 Windows 原有电源计划\n" +
+            "• 不进行无法稳定复现的内置“延迟跑分”\n\n" +
             "继续吗？";
     }
 
@@ -563,48 +418,6 @@ public partial class MainWindow : Window
         AppendLog($"[ASSESS] 优化前已有 {assessment.MatchingCount}/{assessment.SupportedCount} 项符合 LIME 推荐值；" +
                   $"待调整 {assessment.DifferentCount}；不适用/无法读取 {assessment.UnsupportedCount}。 ");
     }
-
-    private void AppendBenchmarkLog(string phase, LatencyBenchmarkResult result)
-    {
-        AppendLog($"[BENCH] {phase}：平均 {FormatMs(result.AverageResponseMs)} · " +
-                  $"偶发 {FormatMs(result.OccasionalResponseMs)} · 抖动 {FormatMs(result.ResponseJitterMs)} · " +
-                  $"最大尖峰 {FormatMs(result.WorstSpikeMs)} · CPU {result.SystemCpuUsagePercent:0.#}% · 样本 {result.SampleCount}");
-    }
-
-    private void AppendComparisonLog(
-        LatencyBenchmarkResult before,
-        LatencyBenchmarkResult after,
-        LatencyComparison comparison,
-        OptimizationAssessment? assessment,
-        string? scenarioNote = null)
-    {
-        if (!string.IsNullOrWhiteSpace(scenarioNote))
-            AppendLog("[POWER-COMPARE] " + scenarioNote.TrimEnd('。') + "。 ");
-        AppendLog($"[BENCH-COMPARE] 平均响应 {FormatMs(before.AverageResponseMs)} -> {FormatMs(after.AverageResponseMs)} " +
-                  $"({SignedPercent(comparison.ResponseImprovementPercent)} 改善方向)；" +
-                  $"抖动 {FormatMs(before.ResponseJitterMs)} -> {FormatMs(after.ResponseJitterMs)} " +
-                  $"({SignedPercent(comparison.JitterImprovementPercent)} 改善方向)。 ");
-
-        if (!comparison.EnvironmentComparable)
-            AppendLog("[BENCH-WARN] " + comparison.EnvironmentNote);
-
-        if (assessment is not null && assessment.MatchRatio >= 0.80)
-            AppendLog($"[ASSESS] 优化前配置匹配率 {assessment.MatchRatio:P0}，属于已高度优化的电源配置。 ");
-    }
-
-    private static string FormatMs(double value)
-        => value < 0.01 ? $"{value:0.0000} ms" : $"{value:0.000} ms";
-
-    private static string FormatChange(double improvementPercent, bool meaningful)
-    {
-        if (!meaningful) return "≈";
-        return improvementPercent > 0
-            ? $"↓ {improvementPercent:0.#}%"
-            : $"↑ {Math.Abs(improvementPercent):0.#}%";
-    }
-
-    private static string SignedPercent(double value)
-        => value >= 0 ? $"+{value:0.#}%" : $"{value:0.#}%";
 
     private void RenderHardware(HardwareInfo hw)
     {
@@ -899,8 +712,7 @@ public partial class MainWindow : Window
                 AppendLog("[RESTART] 此项配置需要重新启动 Windows 才能完全生效。");
                 MessageBox.Show(
                     result.Message +
-                    "\n\n当前不会自动重启电脑。请在方便时手动重新启动 Windows。" +
-                    "\n\n如果想比较此调整前后的软件侧响应，可在重启前点击“测试当前状态”并“保存对比基准”，重启后再测试。",
+                    "\n\n当前不会自动重启电脑。请在方便时手动重新启动 Windows。重启后再次打开 LIME，即可确认实际运行状态。",
                     "需要重新启动",
                     MessageBoxButton.OK,
                     MessageBoxImage.Information);
@@ -923,8 +735,7 @@ public partial class MainWindow : Window
     {
         bool idle = !IsBusy;
         ApplyButton.IsEnabled = idle && _hardware is not null;
-        RunBenchmarkButton.IsEnabled = idle && _hardware is not null;
-        SaveBenchmarkBaselineButton.IsEnabled = idle && _lastBenchmark is not null;
+        RefreshOptimizationStatusButton.IsEnabled = idle && _hardware is not null && !_statusRefreshing;
 
         if (_tweakSnapshot is not null)
             RenderSystemTweaks(_tweakSnapshot);

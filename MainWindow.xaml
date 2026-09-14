@@ -47,7 +47,7 @@
                 </Border>
                 <StackPanel VerticalAlignment="Center">
                     <TextBlock Text="LIME_YOUR_PC" FontFamily="Segoe UI Semibold" FontSize="25"/>
-                    <TextBlock Text="Windows Gaming Optimizer · v0.6.1" Foreground="{StaticResource MutedTextBrush}" FontSize="12" Margin="0,3,0,0"/>
+                    <TextBlock Text="Windows Gaming Optimizer · v0.6.4" Foreground="{StaticResource MutedTextBrush}" FontSize="12" Margin="0,3,0,0"/>
                 </StackPanel>
             </StackPanel>
 
@@ -227,7 +227,7 @@
                     <RowDefinition Height="*"/>
                 </Grid.RowDefinitions>
 
-                <!-- Software-side response benchmark -->
+                <!-- Configuration status -->
                 <Border Grid.Row="0" Style="{StaticResource CardStyle}">
                     <StackPanel>
                         <Grid>
@@ -236,16 +236,16 @@
                                 <ColumnDefinition Width="Auto"/>
                             </Grid.ColumnDefinitions>
                             <StackPanel>
-                                <TextBlock Text="系统响应测试" Foreground="{StaticResource LemonBrush}" FontFamily="Segoe UI Semibold" FontSize="12"/>
-                                <TextBlock Text="Windows 定时唤醒与线程调度响应" FontFamily="Segoe UI Semibold" FontSize="16" Margin="0,4,0,0"/>
+                                <TextBlock Text="优化状态" Foreground="{StaticResource LemonBrush}" FontFamily="Segoe UI Semibold" FontSize="12"/>
+                                <TextBlock Text="当前电源计划与 LIME 推荐配置" FontFamily="Segoe UI Semibold" FontSize="16" Margin="0,4,0,0"/>
                             </StackPanel>
                             <Border Grid.Column="1" Background="#20262A" CornerRadius="9" Padding="9,5" VerticalAlignment="Center">
-                                <TextBlock x:Name="BenchmarkBadgeText" Text="尚未测试" Foreground="{StaticResource MutedTextBrush}" FontFamily="Segoe UI Semibold" FontSize="10"/>
+                                <TextBlock x:Name="OptimizationStatusBadgeText" Text="正在检测" Foreground="{StaticResource MutedTextBrush}" FontFamily="Segoe UI Semibold" FontSize="10"/>
                             </Border>
                         </Grid>
 
-                        <TextBlock Text="这是软件侧 A/B 测试，不代表鼠标到显示器的端到端输入延迟。"
-                                   Foreground="{StaticResource MutedTextBrush}" FontSize="10.5" TextWrapping="Wrap" Margin="0,7,0,10"/>
+                        <TextBlock Text="LIME 只报告能够读取和验证的配置状态，不生成无法可靠复现的“延迟降低百分比”。"
+                                   Foreground="{StaticResource MutedTextBrush}" FontSize="10.5" TextWrapping="Wrap" Margin="0,7,0,11"/>
 
                         <Grid Margin="0,0,0,8">
                             <Grid.ColumnDefinitions>
@@ -257,40 +257,38 @@
                                 <RowDefinition Height="Auto"/>
                             </Grid.RowDefinitions>
 
-                            <StackPanel Grid.Row="0" Grid.Column="0" Margin="0,0,8,8">
-                                <TextBlock Text="平均响应延迟" Foreground="{StaticResource MutedTextBrush}" FontSize="10"/>
-                                <TextBlock x:Name="BenchmarkAverageText" Text="—" FontFamily="Segoe UI Semibold" FontSize="15" Margin="0,2,0,0"/>
+                            <StackPanel Grid.Row="0" Grid.Column="0" Margin="0,0,8,9">
+                                <TextBlock Text="当前电源计划" Foreground="{StaticResource MutedTextBrush}" FontSize="10"/>
+                                <TextBlock x:Name="OptimizationPlanText" Text="—" FontFamily="Segoe UI Semibold" FontSize="14" Margin="0,2,0,0" TextWrapping="Wrap"/>
                             </StackPanel>
-                            <StackPanel Grid.Row="0" Grid.Column="1" Margin="8,0,0,8">
-                                <TextBlock Text="偶发响应延迟" Foreground="{StaticResource MutedTextBrush}" FontSize="10"/>
-                                <TextBlock x:Name="BenchmarkOccasionalText" Text="—" FontFamily="Segoe UI Semibold" FontSize="15" Margin="0,2,0,0"/>
+                            <StackPanel Grid.Row="0" Grid.Column="1" Margin="8,0,0,9">
+                                <TextBlock Text="关键电源参数" Foreground="{StaticResource MutedTextBrush}" FontSize="10"/>
+                                <TextBlock x:Name="OptimizationParamsText" Text="—" FontFamily="Segoe UI Semibold" FontSize="14" Margin="0,2,0,0" TextWrapping="Wrap"/>
                             </StackPanel>
                             <StackPanel Grid.Row="1" Grid.Column="0" Margin="0,0,8,0">
-                                <TextBlock Text="响应抖动" Foreground="{StaticResource MutedTextBrush}" FontSize="10"/>
-                                <TextBlock x:Name="BenchmarkJitterText" Text="—" FontFamily="Segoe UI Semibold" FontSize="15" Margin="0,2,0,0"/>
+                                <TextBlock Text="处理器调度策略" Foreground="{StaticResource MutedTextBrush}" FontSize="10"/>
+                                <TextBlock x:Name="OptimizationSchedulingText" Text="—" FontFamily="Segoe UI Semibold" FontSize="13" Margin="0,2,0,0" TextWrapping="Wrap"/>
                             </StackPanel>
                             <StackPanel Grid.Row="1" Grid.Column="1" Margin="8,0,0,0">
-                                <TextBlock Text="最大延迟尖峰" Foreground="{StaticResource MutedTextBrush}" FontSize="10"/>
-                                <TextBlock x:Name="BenchmarkWorstText" Text="—" FontFamily="Segoe UI Semibold" FontSize="15" Margin="0,2,0,0"/>
+                                <TextBlock Text="LIME 电源计划" Foreground="{StaticResource MutedTextBrush}" FontSize="10"/>
+                                <TextBlock x:Name="OptimizationLimePlanText" Text="—" FontFamily="Segoe UI Semibold" FontSize="13" Margin="0,2,0,0" TextWrapping="Wrap"/>
                             </StackPanel>
                         </Grid>
 
-                        <TextBlock x:Name="BenchmarkConclusionText" Text="可先测试当前状态；随后一键优化会直接复用这次结果，不重复测试优化前。"
-                                   Foreground="{StaticResource TextBrush}" FontSize="11" TextWrapping="Wrap" Margin="0,2,0,0"/>
-                        <TextBlock x:Name="BenchmarkBaselineText" Text="跨重启对比基准：未保存（VBS / HVCI 等场景可用）" Foreground="{StaticResource MutedTextBrush}" FontSize="10" Margin="0,4,0,8" TextWrapping="Wrap"/>
-
-                        <ProgressBar x:Name="BenchmarkProgressBar" Height="5" Minimum="0" Maximum="100" Value="0" Background="#2A3035" Foreground="{StaticResource LemonBrush}" BorderThickness="0"/>
+                        <Border Background="#15191C" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="9" Padding="10" Margin="0,4,0,0">
+                            <StackPanel>
+                                <TextBlock x:Name="OptimizationConclusionText" Text="正在检查当前配置…" FontFamily="Segoe UI Semibold" FontSize="11.5" TextWrapping="Wrap"/>
+                                <TextBlock x:Name="OptimizationDetailsText" Text="" Foreground="{StaticResource MutedTextBrush}" FontSize="10" TextWrapping="Wrap" Margin="0,3,0,0"/>
+                            </StackPanel>
+                        </Border>
 
                         <Grid Margin="0,9,0,0">
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="*"/>
                                 <ColumnDefinition Width="Auto"/>
-                                <ColumnDefinition Width="8"/>
-                                <ColumnDefinition Width="Auto"/>
                             </Grid.ColumnDefinitions>
-                            <TextBlock x:Name="BenchmarkEnvironmentText" Text="建议关闭大型后台任务后测试" Foreground="{StaticResource MutedTextBrush}" FontSize="10" VerticalAlignment="Center" TextWrapping="Wrap"/>
-                            <Button x:Name="SaveBenchmarkBaselineButton" Grid.Column="1" Content="保存对比基准" Width="106" ToolTip="用于 VBS / HVCI 等重启后的手动 A/B 对比" Padding="9,6" Style="{StaticResource GhostButtonStyle}" Click="SaveBenchmarkBaselineButton_Click" IsEnabled="False"/>
-                            <Button x:Name="RunBenchmarkButton" Grid.Column="3" Content="测试当前状态" Width="112" ToolTip="测试后若直接一键优化，本次结果会自动作为优化前基准" Padding="9,6" Style="{StaticResource GhostButtonStyle}" Click="RunBenchmarkButton_Click"/>
+                            <TextBlock Text="状态会在启动和应用优化后自动刷新，也可以手动重新检测" Foreground="{StaticResource MutedTextBrush}" FontSize="10" VerticalAlignment="Center" TextWrapping="Wrap"/>
+                            <Button x:Name="RefreshOptimizationStatusButton" Grid.Column="1" Content="重新检测" Width="92" Padding="9,6" Style="{StaticResource GhostButtonStyle}" Click="RefreshOptimizationStatusButton_Click"/>
                         </Grid>
                     </StackPanel>
                 </Border>
@@ -351,7 +349,7 @@
             </Grid.ColumnDefinitions>
             <StackPanel VerticalAlignment="Center">
                 <TextBlock Text="偏向游戏性能与响应速度" FontFamily="Segoe UI Semibold" FontSize="13"/>
-                <TextBlock Text="主按钮仅修改 AC 电源参数，并自动进行软件侧响应 A/B 测试；系统调整需单独操作。" Foreground="{StaticResource MutedTextBrush}" FontSize="11" Margin="0,2,0,0"/>
+                <TextBlock Text="主按钮仅修改 AC 电源参数；系统调整需单独操作，优化状态只报告可读取和验证的配置。" Foreground="{StaticResource MutedTextBrush}" FontSize="11" Margin="0,2,0,0"/>
             </StackPanel>
             <Button x:Name="ApplyButton" Grid.Column="2" Content="▶  应用 LIME 优化" Width="310" Height="58" Foreground="#0A0D0B" FontWeight="SemiBold" Style="{StaticResource PrimaryButtonStyle}" Click="ApplyButton_Click"/>
         </Grid>
