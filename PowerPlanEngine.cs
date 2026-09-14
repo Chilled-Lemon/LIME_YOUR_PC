@@ -35,6 +35,14 @@ internal sealed record CpuTopology(
 
 public sealed record EngineProgress(int Percent, string Message);
 
+public sealed record PowerPlanContext(
+    string? ActivePlanGuid,
+    string ActivePlanName,
+    string? LimePlanGuid,
+    bool LimePlanExists,
+    bool LimePlanIsActive,
+    bool LegacyPlanName);
+
 public sealed record OptimizationResult(
     string PlanGuid,
     int SuccessCount,
@@ -42,13 +50,26 @@ public sealed record OptimizationResult(
     int MismatchCount,
     bool ReusedExistingPlan);
 
+public sealed record OptimizationAssessment(
+    string? PlanGuid,
+    int SupportedCount,
+    int MatchingCount,
+    int DifferentCount,
+    int UnsupportedCount,
+    IReadOnlyList<string> MatchingSettings,
+    IReadOnlyList<string> DifferentSettings,
+    IReadOnlyList<string> UnsupportedSettings)
+{
+    public double MatchRatio => SupportedCount == 0 ? 0 : (double)MatchingCount / SupportedCount;
+}
+
 internal sealed record PowerCfgResult(int ExitCode, string Output);
 
 public sealed class PowerPlanEngine
 {
     public const string AppName = "LIME_YOUR_PC";
     private const string LegacyAppName = "LEMON_YOUR_PC";
-    public const string Version = "v0.5.2";
+    public const string Version = "v0.6.1";
     public static readonly string LogFile = Path.Combine(AppContext.BaseDirectory, AppName + ".log");
 
     private const string HighPerformanceGuid = "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c";
@@ -68,6 +89,8 @@ public sealed class PowerPlanEngine
     private const string Class1MinProcessorState = "893dee8e-2bef-41e0-89c6-b55d0929964d";
     private const string Class2MinProcessorState = "893dee8e-2bef-41e0-89c6-b55d0929964e";
     private const string HeterogeneousSchedulingPolicy = "93b8b6dc-0698-4d1c-9ee4-0644e900c85d";
+    private const string DisplaySubgroup = "7516b95f-f776-4464-8c53-06167f40cc99";
+    private const string DisplayTimeout = "3c0bc021-c8a8-4e07-a973-6b14cbcb2b7e";
 
     public HardwareInfo DetectHardware()
     {
@@ -332,9 +355,100 @@ public sealed class PowerPlanEngine
     private static CpuTopology EmptyTopology()
         => new(0, 0, 0, 0, 0, 0, Array.Empty<byte>());
 
+    public PowerPlanContext GetPowerPlanContext(bool refreshMetadata = false)
+    {
+        string? activeGuid = GetActiveSchemeGuid();
+        string? limeGuid = FindExistingLimePlan(out bool legacyPlanName);
+
+        if (limeGuid is not null && refreshMetadata)
+        {
+            if (UpdateLimePlanMetadata(limeGuid))
+                legacyPlanName = false;
+        }
+
+        string activeName = GetSchemeName(activeGuid) ?? "当前电源计划";
+        bool limeIsActive = activeGuid is not null && limeGuid is not null &&
+                            activeGuid.Equals(limeGuid, StringComparison.OrdinalIgnoreCase);
+
+        return new PowerPlanContext(
+            activeGuid,
+            activeName,
+            limeGuid,
+            limeGuid is not null,
+            limeIsActive,
+            legacyPlanName);
+    }
+
+    public bool RefreshExistingLimePlanMetadata()
+    {
+        string? limeGuid = FindExistingLimePlan(out _);
+        return limeGuid is null || UpdateLimePlanMetadata(limeGuid);
+    }
+
+    public OptimizationAssessment AssessCurrentPlan(HardwareInfo hw)
+    {
+        string? planGuid = GetActiveSchemeGuid();
+        if (planGuid is null)
+        {
+            return new OptimizationAssessment(
+                null, 0, 0, 0, 15,
+                Array.Empty<string>(),
+                Array.Empty<string>(),
+                new[] { "无法读取当前活动电源计划" });
+        }
+
+        var targets = new List<(string Name, string Group, string Setting, int Expected)>
+        {
+            ("USB 选择性暂停", UsbSubgroup, UsbSelectiveSuspend, 0),
+            ("USB3 Link Power Management", UsbSubgroup, Usb3LinkPower, 0),
+            ("处理器性能提高阈值", ProcessorSubgroup, PerfIncreaseThreshold, 1),
+            ("Class 1 处理器性能提高阈值", ProcessorSubgroup, Class1PerfIncreaseThreshold, 1),
+            ("处理器性能最小核心数量", ProcessorSubgroup, PerfCoreParkingMinCores, 100),
+            ("Class 1 处理器性能最小核心数量", ProcessorSubgroup, Class1PerfCoreParkingMinCores, 100),
+            ("允许节流状态", ProcessorSubgroup, AllowThrottleStates, 0),
+            ("处理器闲置降级阈值", ProcessorSubgroup, IdleDemoteThreshold, hw.IsLaptop ? 80 : 100),
+            ("处理器闲置提升阈值", ProcessorSubgroup, IdlePromoteThreshold, hw.IsLaptop ? 85 : 100),
+            ("处理器性能时间间隔", ProcessorSubgroup, PerfTimeCheckInterval, 5000),
+            ("最小处理器状态", ProcessorSubgroup, MinProcessorState, 100),
+            ("Class 1 最小处理器状态", ProcessorSubgroup, Class1MinProcessorState, 100),
+            ("Class 2 最小处理器状态", ProcessorSubgroup, Class2MinProcessorState, 100),
+            ("异类线程调度策略", ProcessorSubgroup, HeterogeneousSchedulingPolicy, GetSchedulingValue(hw)),
+            ("关闭显示器（AC）", DisplaySubgroup, DisplayTimeout, 0)
+        };
+
+        var matching = new List<string>();
+        var different = new List<string>();
+        var unsupported = new List<string>();
+
+        foreach (var target in targets)
+        {
+            int? actual = GetAcValue(planGuid, target.Group, target.Setting);
+            if (actual is null)
+                unsupported.Add(target.Name);
+            else if (actual.Value == target.Expected)
+                matching.Add(target.Name);
+            else
+                different.Add(target.Name);
+        }
+
+        Log($"Assessment | plan={planGuid} supported={matching.Count + different.Count} matching={matching.Count} different={different.Count} unsupported={unsupported.Count}");
+        return new OptimizationAssessment(
+            planGuid,
+            matching.Count + different.Count,
+            matching.Count,
+            different.Count,
+            unsupported.Count,
+            matching,
+            different,
+            unsupported);
+    }
+
     public OptimizationResult Apply(HardwareInfo hw, IProgress<EngineProgress>? progress = null)
     {
         Report(progress, 3, "检查现有 LIME_YOUR_PC 电源计划…");
+
+        string? previousActiveGuid = GetActiveSchemeGuid();
+        string previousActiveName = GetSchemeName(previousActiveGuid) ?? "当前电源计划";
 
         string? existingPlanGuid = FindExistingLimePlan(out bool legacyPlanName);
         bool reused = existingPlanGuid is not null;
@@ -344,11 +458,12 @@ public sealed class PowerPlanEngine
         {
             planGuid = existingPlanGuid;
 
-            if (legacyPlanName)
-            {
-                RunPowerCfg($"/changename {planGuid} \"{AppName}\" \"{AppName} {Version} - Gaming Power Plan\"");
-                Report(progress, 8, $"检测到旧版 {LegacyAppName} 计划，已迁移为 {AppName}。 ");
-            }
+            if (!UpdateLimePlanMetadata(planGuid))
+                Report(progress, 7, "[WARNING] 无法刷新 LIME 电源计划的版本说明，但不会影响参数优化。 ");
+            else if (legacyPlanName)
+                Report(progress, 8, $"检测到旧版 {LegacyAppName} 计划，已迁移并更新为 {AppName} {Version}。 ");
+            else
+                Report(progress, 8, $"已将既存 LIME 电源计划信息更新为 {Version}。 ");
 
             Report(progress, 10, $"找到已有计划，直接复用：{planGuid}");
         }
@@ -371,7 +486,7 @@ public sealed class PowerPlanEngine
             planGuid = DuplicateScheme(baseGuid)
                        ?? throw new InvalidOperationException("创建 LIME_YOUR_PC 电源计划失败。");
 
-            if (!RunPowerCfg($"/changename {planGuid} \"{AppName}\" \"{AppName} {Version} - Gaming Power Plan\""))
+            if (!UpdateLimePlanMetadata(planGuid))
                 throw new InvalidOperationException("重命名 LIME_YOUR_PC 电源计划失败。");
 
             Report(progress, 13, $"已创建新计划：{planGuid}");
@@ -379,6 +494,15 @@ public sealed class PowerPlanEngine
 
         if (!RunPowerCfg($"/setactive {planGuid}"))
             throw new InvalidOperationException("无法激活 LIME_YOUR_PC 电源计划。");
+
+        bool switchedPlan = previousActiveGuid is not null &&
+                            !previousActiveGuid.Equals(planGuid, StringComparison.OrdinalIgnoreCase);
+        if (switchedPlan)
+        {
+            Report(progress, 14, reused
+                ? $"[INFO] 已从“{previousActiveName}”切换至既存的 LIME_YOUR_PC 电源计划。"
+                : $"[INFO] 已从“{previousActiveName}”切换至新创建的 LIME_YOUR_PC 电源计划。");
+        }
 
         int success = 0;
         int skipped = 0;
@@ -445,9 +569,13 @@ public sealed class PowerPlanEngine
             Report(progress, 96, "[PASS] LIME_YOUR_PC 已处于活动状态");
         }
 
-        Report(progress, 100, reused
-            ? "完成：已复用并刷新现有 LIME_YOUR_PC 计划。"
-            : "完成：已创建并应用 LIME_YOUR_PC 计划。");
+        Report(progress, 100, switchedPlan
+            ? (reused
+                ? $"完成：已切换至既存的 LIME_YOUR_PC 计划，并刷新至 {Version} 配置。"
+                : $"完成：已创建并切换至 LIME_YOUR_PC {Version} 计划。")
+            : (reused
+                ? $"完成：已复用并刷新现有 LIME_YOUR_PC 计划至 {Version}。"
+                : $"完成：已创建并应用 LIME_YOUR_PC {Version} 计划。"));
 
         Log($"Completed | plan={planGuid} reused={reused} success={success} skipped={skipped} mismatch={mismatch}");
         return new OptimizationResult(planGuid, success, skipped, mismatch, reused);
@@ -503,6 +631,62 @@ public sealed class PowerPlanEngine
         }
 
         return mismatch;
+    }
+
+    private bool UpdateLimePlanMetadata(string planGuid)
+    {
+        string description = $"{AppName} {Version} · 游戏性能电源计划";
+        return RunPowerCfg($"/changename {planGuid} \"{AppName}\" \"{description}\"");
+    }
+
+    private string? GetSchemeName(string? schemeGuid)
+    {
+        if (string.IsNullOrWhiteSpace(schemeGuid) || !Guid.TryParse(schemeGuid, out Guid scheme))
+            return null;
+
+        // Do not parse the localized text produced by powercfg here. On Chinese Windows,
+        // redirected powercfg output can use the console OEM code page while .NET treats
+        // Encoding.Default as UTF-8, which turns Chinese plan names into mojibake.
+        // PowerReadFriendlyName returns the Unicode friendly name directly from the power API.
+        try
+        {
+            uint bufferSize = 0;
+            uint first = NativeMethods.PowerReadFriendlyName(
+                IntPtr.Zero, ref scheme, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, ref bufferSize);
+
+            // ERROR_MORE_DATA (234) is the normal first-call result; some Windows builds
+            // may also return ERROR_SUCCESS while only reporting the required size.
+            if ((first != 0 && first != 234) || bufferSize < 2)
+            {
+                Log($"PowerReadFriendlyName(size) failed | result={first} scheme={schemeGuid}");
+                return null;
+            }
+
+            IntPtr buffer = Marshal.AllocHGlobal(checked((int)bufferSize));
+            try
+            {
+                uint size = bufferSize;
+                uint result = NativeMethods.PowerReadFriendlyName(
+                    IntPtr.Zero, ref scheme, IntPtr.Zero, IntPtr.Zero, buffer, ref size);
+                if (result != 0)
+                {
+                    Log($"PowerReadFriendlyName(read) failed | result={result} scheme={schemeGuid}");
+                    return null;
+                }
+
+                string? name = Marshal.PtrToStringUni(buffer);
+                return string.IsNullOrWhiteSpace(name) ? null : name.Trim();
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(buffer);
+            }
+        }
+        catch (Exception ex)
+        {
+            Log("PowerReadFriendlyName exception: " + ex.Message);
+            return null;
+        }
     }
 
     private string? FindExistingLimePlan(out bool legacyName)
@@ -702,6 +886,15 @@ public sealed class PowerPlanEngine
             ref Guid SubGroupOfPowerSettingsGuid,
             ref Guid PowerSettingGuid,
             out uint AcValueIndex);
+
+        [DllImport("powrprof.dll", SetLastError = false)]
+        internal static extern uint PowerReadFriendlyName(
+            IntPtr RootPowerKey,
+            ref Guid SchemeGuid,
+            IntPtr SubGroupOfPowerSettingsGuid,
+            IntPtr PowerSettingGuid,
+            IntPtr Buffer,
+            ref uint BufferSize);
     }
 
 }

@@ -7,9 +7,9 @@
     <Nullable>enable</Nullable>
     <AssemblyName>LIME_YOUR_PC</AssemblyName>
     <RootNamespace>LIME_YOUR_PC</RootNamespace>
-    <Version>0.5.2</Version>
-    <FileVersion>0.5.2.0</FileVersion>
-    <AssemblyVersion>0.5.2.0</AssemblyVersion>
+    <Version>0.6.1</Version>
+    <FileVersion>0.6.1.0</FileVersion>
+    <AssemblyVersion>0.6.1.0</AssemblyVersion>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <SelfContained>true</SelfContained>
     <PublishSingleFile>true</PublishSingleFile>
